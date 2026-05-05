@@ -34,22 +34,24 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         owner: str | None = None,
         name_contains: str | None = None,
         visibility: str | None = None,
-        limit: int | None = 50,
-    ) -> list[dict[str, Any]]:
+        limit: int | None = None,
+    ) -> dict[str, Any]:
         """List GitHub repositories available to this GitHub App installation, optionally filtered.
 
         Use to discover which owner/repo slugs can be read or written before
         cloning, opening issues, creating pull requests, or checking workflows.
         `owner` filters by org/user, `name_contains` matches repo names or
         full_name case-insensitively, `visibility` is public or private, and
-        `limit` caps returned rows.
+        `limit` caps returned rows. When omitted, all matching repositories are
+        returned. Responses include count metadata so truncated results are
+        explicit.
         """
-        cap = _clamp_limit(limit, default=50)
+        cap = _clamp_limit(limit, default=100) if limit is not None else None
         rows: list[dict[str, Any]] = []
         page = 1
         needle = name_contains.lower() if name_contains else None
         visibility_filter = visibility.lower() if visibility else None
-        while len(rows) < cap:
+        while True:
             body = gh.get("/installation/repositories", params={"per_page": 100, "page": page})
             repos = body.get("repositories", [])
             if not repos:
@@ -72,12 +74,20 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
                         "default_branch": r["default_branch"],
                     }
                 )
-                if len(rows) >= cap:
-                    break
             if len(repos) < 100:
                 break
             page += 1
-        return rows
+
+        returned_rows = rows[:cap] if cap is not None else rows
+        truncated = cap is not None and len(rows) > cap
+        return {
+            "repositories": returned_rows,
+            "count": len(returned_rows),
+            "total_count": len(rows),
+            "truncated": truncated,
+            "has_more": truncated,
+            "limit": cap,
+        }
 
     @mcp.tool()
     def mint_clone_token(
