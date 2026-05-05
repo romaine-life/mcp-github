@@ -1,0 +1,38 @@
+# ============================================================================
+# mcp-github values
+# ============================================================================
+# GitHub App credentials (App ID, installation ID, private key) come from
+# pre-existing KV secrets via ExternalSecret. No Azure UAMI involved —
+# this server has no Azure surface, only talks to api.github.com.
+
+image:
+  repository: romainecr.azurecr.io/mcp-github
+  # SHA-pinned. .github/workflows/build.yml rewrites this tag on every push to main
+  # via a `[skip ci]` follow-up commit. Quoted so all-digit short-SHAs don't
+  # become floats — see reference_yaml_tag_quoting.md.
+  tag: "1679018"
+  pullPolicy: IfNotPresent
+
+# Loopback-only port the Python uvicorn server listens on.
+upstreamPort: 8080
+
+proxy:
+  image:
+    repository: quay.io/brancz/kube-rbac-proxy
+    tag: v0.18.2
+    pullPolicy: IfNotPresent
+  port: 8443
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+proxyResources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 64Mi

@@ -1,0 +1,4 @@
+apiVersion: v2
+name: mcp-github
+version: 0.2.0
+description: Custom GitHub MCP Server (HTTP). Outgoing GitHub auth via shared App installation token; incoming auth via kube-rbac-proxy K8s SA TokenReview.
