@@ -1,3 +1,4 @@
+import time
 from typing import Any
 
 import httpx
@@ -781,6 +782,63 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
             }
             for r in body.get("workflow_runs", [])[:cap]
         ]
+
+    @mcp.tool()
+    def dispatch_workflow(
+        owner: str,
+        name: str,
+        workflow: str,
+        ref: str = "main",
+        inputs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Trigger a workflow_dispatch event on a GitHub Actions workflow.
+
+        Use to manually run a workflow that opts in via `on: workflow_dispatch`,
+        scoped to a branch or tag. Useful when CI is gated on push to main
+        but you want to validate a feature branch (e.g. image builds before
+        a PR lands), or to rerun an idempotent build after fixing inputs.
+
+        `workflow` is a workflow file name like `build.yml` or a numeric
+        workflow ID. `ref` is the branch/tag to run against (default
+        "main"). `inputs` is a dict of declared workflow_dispatch inputs.
+
+        Returns `{ok, ref, workflow, run_url, runs_url}`. The dispatch
+        endpoint returns 204 with no body, so we round-trip a fresh
+        `list_workflow_runs` call to surface the just-created run's URL
+        (best-effort: returns the most recent run on `ref`).
+
+        Requires the App's installation to have `actions: write`. If you
+        get HTTP 403 "Resource not accessible by integration", the App
+        needs that permission added at install time.
+        """
+        body: dict[str, Any] = {"ref": ref}
+        if inputs:
+            body["inputs"] = inputs
+        gh.post(
+            f"/repos/{owner}/{name}/actions/workflows/{workflow}/dispatches",
+            json=body,
+        )
+        # GitHub accepts the dispatch async — give it a moment to surface
+        # in the runs list before we look it up. Non-fatal if we miss it.
+        time.sleep(1.5)
+        run_url: str | None = None
+        try:
+            runs = gh.get(
+                f"/repos/{owner}/{name}/actions/workflows/{workflow}/runs",
+                params={"branch": ref, "per_page": 1, "event": "workflow_dispatch"},
+            )
+            recent = runs.get("workflow_runs") or []
+            if recent:
+                run_url = recent[0].get("html_url")
+        except Exception:  # noqa: BLE001 — surfacing the dispatch matters more than the lookup
+            pass
+        return {
+            "ok": True,
+            "ref": ref,
+            "workflow": workflow,
+            "run_url": run_url,
+            "runs_url": f"https://github.com/{owner}/{name}/actions/workflows/{workflow}",
+        }
 
     @mcp.tool()
     def get_workflow_run(owner: str, name: str, run_id: int) -> dict[str, Any]:
