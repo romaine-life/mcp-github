@@ -118,6 +118,13 @@ def build_app() -> Starlette:
     async def healthz(_: Request) -> Response:
         return Response("ok", media_type="text/plain")
 
+    async def delete_session(_: Request) -> Response:
+        # MCP streamable-http spec says stateless servers SHOULD return 405
+        # for DELETE, but Claude Code's MCP client treats 405 as a fatal error
+        # rather than a graceful "no session to terminate" signal. Return 200
+        # so the client can reconnect cleanly after a pod restart.
+        return Response(status_code=200)
+
     resolver = CallerResolver()
 
     # Starlette's Mount doesn't forward lifespan events to the inner app, so
@@ -133,6 +140,7 @@ def build_app() -> Starlette:
     return Starlette(
         routes=[
             Route("/healthz", healthz),
+            Route("/", delete_session, methods=["DELETE"]),
             Mount("/", app=mcp.streamable_http_app()),
         ],
         # Middleware applies to every route, including /healthz — that's
