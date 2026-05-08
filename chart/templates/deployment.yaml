@@ -26,13 +26,21 @@ spec:
             - name: upstream
               containerPort: {{ .Values.upstreamPort }}
           envFrom:
-            # GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID /
-            # GITHUB_APP_PRIVATE_KEY synced from KV by ExternalSecret.
+            # GITHUB_APP_* (host romaine-life-app) and TANK_OPERATOR_APP_*
+            # (user-facing tank-operator-romaine-life) synced from KV by
+            # ExternalSecret. Per-caller routing in #57 stage 3 picks
+            # which to use per request.
             - secretRef:
                 name: mcp-github-config
           env:
             - name: PORT
               value: "{{ .Values.upstreamPort }}"
+            # Orchestrator endpoint for per-caller resolution
+            # (#57 stage 3). In-cluster Service URL — no TLS,
+            # no cross-namespace ingress. Override per slot if the
+            # orchestrator runs in a non-default namespace.
+            - name: ORCHESTRATOR_INTERNAL_URL
+              value: "{{ .Values.orchestratorUrl }}"
           readinessProbe:
             # Server binds 127.0.0.1 (loopback only) — exec probe runs
             # inside the container's netns so localhost resolves.

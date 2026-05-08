@@ -36,3 +36,9 @@ proxyResources:
     memory: 32Mi
   limits:
     memory: 64Mi
+
+# Orchestrator endpoint mcp-github calls for per-caller resolution
+# (#57 stage 3). In-cluster Service URL — no TLS, no ingress hop.
+# Overridden in per-slot value overlays where the orchestrator runs in
+# a different namespace.
+orchestratorUrl: http://tank-operator.tank-operator.svc:80
