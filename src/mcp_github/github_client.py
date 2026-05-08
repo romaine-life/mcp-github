@@ -7,6 +7,41 @@ from .minter_pool import MinterPool
 
 GITHUB_API = "https://api.github.com"
 
+# Cap the response-body excerpt we splice into error messages. GitHub's error
+# bodies for normal failures (404 / 422 / 405) are tiny JSON; this cap is
+# only a guard against pathological upstream responses (HTML error pages,
+# enormous validation lists) blowing up an MCP frame.
+_ERROR_BODY_CAP = 1200
+
+
+def _check(r: httpx.Response) -> None:
+    """Raise on non-2xx with the response body included in the error.
+
+    ``httpx.Response.raise_for_status`` raises an ``HTTPStatusError``
+    whose ``__str__`` is just the status line — when this exception
+    bubbles through the MCP transport, the body that GitHub returned
+    (e.g. "Required status check has not been verified" on a 405 merge
+    attempt, or the 422 list of which fields failed validation) is
+    silently dropped. Re-raise with the body inlined so MCP clients see
+    GitHub's actual explanation, not just a status code.
+
+    Preserves the ``HTTPStatusError`` class and ``response`` attribute
+    so existing callers that pattern-match on ``exc.response.status_code``
+    (see ``_is_404`` in tools.py) keep working.
+    """
+    if r.is_success:
+        return
+    body = r.text or ""
+    if len(body) > _ERROR_BODY_CAP:
+        body = body[:_ERROR_BODY_CAP] + "...(truncated)"
+    detail = f": {body}" if body else ""
+    raise httpx.HTTPStatusError(
+        f"{r.status_code} {r.reason_phrase} for "
+        f"{r.request.method} {r.request.url}{detail}",
+        request=r.request,
+        response=r,
+    )
+
 
 class GitHubClient:
     """Wraps GitHub API calls with the right per-caller App minter.
@@ -34,7 +69,7 @@ class GitHubClient:
 
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         r = httpx.get(f"{GITHUB_API}{path}", headers=self._headers(), params=params, timeout=15.0)
-        r.raise_for_status()
+        _check(r)
         return r.json()
 
     def get_text(self, path: str) -> str:
@@ -49,7 +84,7 @@ class GitHubClient:
             timeout=30.0,
             follow_redirects=True,
         )
-        r.raise_for_status()
+        _check(r)
         return r.text
 
     def get_bytes(self, path: str) -> bytes:
@@ -63,27 +98,27 @@ class GitHubClient:
             timeout=120.0,
             follow_redirects=True,
         )
-        r.raise_for_status()
+        _check(r)
         return r.content
 
     def post(self, path: str, json: dict[str, Any] | None = None) -> Any:
         r = httpx.post(f"{GITHUB_API}{path}", headers=self._headers(), json=json, timeout=15.0)
-        r.raise_for_status()
+        _check(r)
         return r.json() if r.content else None
 
     def patch(self, path: str, json: dict[str, Any] | None = None) -> Any:
         r = httpx.patch(f"{GITHUB_API}{path}", headers=self._headers(), json=json, timeout=15.0)
-        r.raise_for_status()
+        _check(r)
         return r.json() if r.content else None
 
     def put(self, path: str, json: dict[str, Any] | None = None) -> Any:
         r = httpx.put(f"{GITHUB_API}{path}", headers=self._headers(), json=json, timeout=15.0)
-        r.raise_for_status()
+        _check(r)
         return r.json() if r.content else None
 
     def delete(self, path: str, json: dict[str, Any] | None = None) -> Any:
         r = httpx.request("DELETE", f"{GITHUB_API}{path}", headers=self._headers(), json=json, timeout=15.0)
-        r.raise_for_status()
+        _check(r)
         return r.json() if r.content else None
 
     def mint_scoped_token(
