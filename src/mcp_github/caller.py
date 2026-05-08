@@ -52,9 +52,19 @@ ORCHESTRATOR_URL = os.environ.get(
     "ORCHESTRATOR_INTERNAL_URL",
     "http://tank-operator.tank-operator.svc:80",
 )
+# Audience-scoped token path. When TANK_OPERATOR_SA_TOKEN_PATH is set
+# (by the chart's projected serviceAccountToken volume), the resolver
+# sends a token minted with audience "tank-operator" so the orchestrator
+# can reject tokens not intended for it (defense-in-depth on top of the
+# SA-name allowlist). Falls back to the default K8s SA token path for
+# backward compatibility in environments that haven't deployed the chart
+# update yet — the allowlist still gates access in that case.
 SA_TOKEN_PATH = os.environ.get(
-    "SA_TOKEN_PATH",
-    "/var/run/secrets/kubernetes.io/serviceaccount/token",
+    "TANK_OPERATOR_SA_TOKEN_PATH",
+    os.environ.get(
+        "SA_TOKEN_PATH",
+        "/var/run/secrets/kubernetes.io/serviceaccount/token",
+    ),
 )
 RESOLVE_TIMEOUT_SECONDS = float(os.environ.get("CALLER_RESOLVE_TIMEOUT", "3.0"))
 # Caller-resolution cache TTL. The orchestrator lookup is cheap, but caching
