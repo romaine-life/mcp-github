@@ -75,6 +75,12 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
+    def _require_super_admin(self) -> CallerIdentity:
+        caller = current_caller()
+        if caller is None or not caller.is_super_admin:
+            raise PermissionError("GitHub installation fan-out requires super-admin access")
+        return caller
+
     def _with_fallback(
         self,
         make_request,  # callable(headers: dict) -> httpx.Response
@@ -96,6 +102,8 @@ class GitHubClient:
         if (
             repo is not None
             and minter is not self._pool.host
+            and caller is not None
+            and caller.is_super_admin
             and _is_cross_install_failure(r)
         ):
             # User installation can't see this repo. Try the host.
@@ -256,6 +264,8 @@ class GitHubClient:
             if (
                 repos_full
                 and minter is not self._pool.host
+                and caller is not None
+                and caller.is_super_admin
                 and original.response.status_code in (404, 422)
             ):
                 try:
@@ -269,3 +279,71 @@ class GitHubClient:
                         self._pool.record_repo_inaccessible(caller, owner, name)
                 return token, expires
             raise
+
+    def list_user_app_installations(self) -> list[dict[str, Any]]:
+        self._require_super_admin()
+        return self._pool.list_user_app_installations()
+
+    def list_repos_for_installation(
+        self,
+        installation_id: int,
+        *,
+        owner: str | None = None,
+        name_contains: str | None = None,
+        visibility: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        self._require_super_admin()
+        minter = self._pool.user_app_minter(installation_id)
+        rows: list[dict[str, Any]] = []
+        page = 1
+        needle = name_contains.lower() if name_contains else None
+        visibility_filter = visibility.lower() if visibility else None
+        while True:
+            r = httpx.get(
+                f"{GITHUB_API}/installation/repositories",
+                headers=self._headers(minter.installation_token()),
+                params={"per_page": 100, "page": page},
+                timeout=15.0,
+            )
+            _check(r)
+            repos = r.json().get("repositories", [])
+            if not repos:
+                break
+            for repo in repos:
+                full_name = repo["full_name"]
+                repo_owner, repo_name = full_name.split("/", 1)
+                if owner and repo_owner.lower() != owner.lower():
+                    continue
+                if visibility_filter == "private" and not repo["private"]:
+                    continue
+                if visibility_filter == "public" and repo["private"]:
+                    continue
+                if needle and needle not in full_name.lower() and needle not in repo_name.lower():
+                    continue
+                rows.append(
+                    {
+                        "installation_id": installation_id,
+                        "full_name": full_name,
+                        "private": repo["private"],
+                        "default_branch": repo["default_branch"],
+                    }
+                )
+            if len(repos) < 100:
+                break
+            page += 1
+        return rows[:limit] if limit is not None else rows
+
+    def mint_scoped_token_for_installation(
+        self,
+        installation_id: int,
+        *,
+        repositories: list[str] | None = None,
+        permissions: dict[str, str] | None = None,
+    ) -> tuple[str, str]:
+        self._require_super_admin()
+        minter = self._pool.user_app_minter(installation_id)
+        return minter.mint_scoped_token(
+            repositories=repositories,
+            permissions=permissions,
+        )

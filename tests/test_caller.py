@@ -51,6 +51,19 @@ def test_caller_identity_from_dict_host_flag() -> None:
         {"email": "host@example.test", "installation_id": 1, "is_host": True}
     )
     assert caller.is_host is True
+    assert caller.is_super_admin is True
+
+
+def test_caller_identity_from_dict_super_admin_flag() -> None:
+    caller = CallerIdentity.from_dict(
+        {
+            "email": "admin@example.test",
+            "installation_id": 1,
+            "is_host": False,
+            "is_super_admin": True,
+        }
+    )
+    assert caller.is_super_admin is True
 
 
 # ---------------------------------------------------------------------------
