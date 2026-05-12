@@ -26,23 +26,31 @@ The pool's job is to pick the right minter per caller:
   so a broken orchestrator endpoint or a fresh pod never blocks
   GitHub access.
 
-We do *not* attempt cross-installation fallback in this PR (i.e.
-"non-host caller touching a host-owned repo, downscope the host
-minter to that single repo"). That's a follow-up; in this PR a
-non-host caller hitting a host-owned repo gets a 404 from GitHub
-because their own installation can't see it. Correct attribution
-> ergonomics for v1.
+Cross-installation downscoped fallback (#57 stage 3 follow-up). When a
+non-host caller's user installation returns a 404 / 403 "Resource not
+accessible by integration" for a repo it doesn't have installed (e.g. a
+host-owned private repo), ``GitHubClient._with_fallback`` retries the
+same call with the host minter and records the repo as inaccessible in a
+TTL'd cache. ``for_caller_repo`` is the proactive side: it checks the
+cache first and returns the host minter immediately, avoiding a doomed
+round-trip for the remainder of the 30-min cache window.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from threading import Lock
 
 from .auth import GitHubAppTokenMinter
 from .caller import CallerIdentity
 
 log = logging.getLogger(__name__)
+
+# How long to cache a "this installation cannot serve this repo" result.
+# Short enough that a user who *adds* the App to a newly-created repo will
+# get correct routing within half an hour without a server restart.
+REPO_ACCESS_CACHE_TTL = 1800.0
 
 
 class MinterPool:
@@ -59,14 +67,26 @@ class MinterPool:
             tank_operator_app_id and tank_operator_private_key
         )
         self._cache: dict[int, GitHubAppTokenMinter] = {}
+        # Maps (installation_id, "owner/name") → (can_serve, expires_at).
+        # False = confirmed inaccessible; True/absent = optimistic.
+        self._repo_access_cache: dict[tuple[int, str], tuple[bool, float]] = {}
         self._lock = Lock()
 
+    @property
+    def host(self) -> GitHubAppTokenMinter:
+        """The host romaine-life-app minter. Exposed so ``GitHubClient``
+        can retry with the host token on cross-installation failures."""
+        return self._host
+
     def for_caller(self, caller: CallerIdentity | None) -> GitHubAppTokenMinter:
-        # Fall back to the host minter for any caller we can't route to a
-        # tank-operator-app installation: unknown caller (resolve-caller
-        # returned None or 404), self-identified host, or a non-host that
-        # hasn't installed the user-facing App yet. Same outcome as today,
-        # so a broken or unconfigured orchestrator never breaks tools.
+        """Return the minter for this caller (caller-scoped, ignoring repo).
+
+        Falls back to the host minter for any caller we can't route to a
+        tank-operator-app installation: unknown caller (resolve-caller
+        returned None or 404), self-identified host, or a non-host that
+        hasn't installed the user-facing App yet. Same outcome as today,
+        so a broken or unconfigured orchestrator never blocks tools.
+        """
         if (
             caller is None
             or caller.is_host
@@ -85,6 +105,70 @@ class MinterPool:
             )
             self._cache[caller.installation_id] = minter
             return minter
+
+    def caller_can_serve_repo(
+        self, caller: CallerIdentity | None, owner: str, name: str
+    ) -> bool:
+        """True if the caller's installation *might* be able to serve this repo.
+
+        Optimistic when unknown: ``GitHubClient._with_fallback`` will detect
+        an actual failure and update the cache. Returns False only when a
+        previous request confirmed the installation can't see this repo and
+        the TTL hasn't expired yet. Always True for host/anonymous callers
+        since those already route to the host minter.
+        """
+        if (
+            caller is None
+            or caller.is_host
+            or caller.installation_id is None
+            or not self._tank_op_enabled
+        ):
+            return True  # already routing to host; per-repo cache irrelevant
+        key = (caller.installation_id, f"{owner}/{name}".lower())
+        with self._lock:
+            entry = self._repo_access_cache.get(key)
+        if entry is None:
+            return True
+        can_serve, expires_at = entry
+        if expires_at < time.time():
+            return True  # TTL expired; optimistically assume accessible again
+        return can_serve
+
+    def record_repo_inaccessible(
+        self, caller: CallerIdentity, owner: str, name: str
+    ) -> None:
+        """Cache that this caller's installation cannot serve ``owner/name``.
+
+        Called by ``GitHubClient._with_fallback`` only after the host-minter
+        retry succeeded, so we never poison the cache on a real 404
+        (missing resource vs. wrong installation).
+        """
+        if caller.installation_id is None:
+            return
+        key = (caller.installation_id, f"{owner}/{name}".lower())
+        expires_at = time.time() + REPO_ACCESS_CACHE_TTL
+        with self._lock:
+            self._repo_access_cache[key] = (False, expires_at)
+        log.info(
+            "cross-install fallback: installation %s cannot serve %s/%s "
+            "(caching for %.0fs)",
+            caller.installation_id, owner, name, REPO_ACCESS_CACHE_TTL,
+        )
+
+    def for_caller_repo(
+        self,
+        caller: CallerIdentity | None,
+        repo: tuple[str, str] | None,
+    ) -> GitHubAppTokenMinter:
+        """Return the right minter for this caller + repo combination.
+
+        Proactively returns the host minter when the repo-access cache
+        confirms the caller's installation can't serve this repo, saving
+        a doomed round-trip. Otherwise delegates to ``for_caller``.
+        """
+        if repo is not None and not self.caller_can_serve_repo(caller, *repo):
+            return self._host
+        return self.for_caller(caller)
 
     @property
     def tank_operator_app_enabled(self) -> bool:

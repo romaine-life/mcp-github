@@ -154,6 +154,8 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         }
         if workflows:
             permissions["workflows"] = "write"
+        # mint_scoped_token falls back to the host minter when the caller's
+        # installation returns 403/422 (repos the installation can't access).
         token, expires_at = gh.mint_scoped_token(
             repositories=repo_names,
             permissions=permissions,
@@ -167,7 +169,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         Use to confirm default branch, language, description, and repository
         existence before creating branches, commits, issues, or pull requests.
         """
-        r = gh.get(f"/repos/{owner}/{name}")
+        r = gh.get(f"/repos/{owner}/{name}", repo=(owner, name))
         return {k: r.get(k) for k in ("full_name", "description", "default_branch", "language", "stargazers_count", "open_issues_count", "updated_at")}
 
     @mcp.tool()
@@ -220,7 +222,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         files where the full body is needed.
         """
         params = {"ref": ref} if ref else None
-        r = gh.get(f"/repos/{owner}/{name}/contents/{path}", params=params)
+        r = gh.get(f"/repos/{owner}/{name}/contents/{path}", params=params, repo=(owner, name))
         if isinstance(r, list):
             return {"kind": "directory", "entries": [{"name": e["name"], "type": e["type"]} for e in r]}
         if r.get("encoding") == "base64":
@@ -269,7 +271,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
                 "per_page": min(cap, 100),
             }
         )
-        body = gh.get(f"/repos/{owner}/{name}/issues", params=params)
+        body = gh.get(f"/repos/{owner}/{name}/issues", params=params, repo=(owner, name))
         rows = [
             {"number": i["number"], "title": i["title"], "state": i["state"], "user": i["user"]["login"]}
             for i in body
@@ -283,7 +285,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
 
         Use after list_issues or when a user references a specific issue number.
         """
-        r = gh.get(f"/repos/{owner}/{name}/issues/{number}")
+        r = gh.get(f"/repos/{owner}/{name}/issues/{number}", repo=(owner, name))
         return {
             "number": r["number"],
             "title": r["title"],
@@ -321,7 +323,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
                 "per_page": min(cap, 100),
             }
         )
-        body = gh.get(f"/repos/{owner}/{name}/pulls", params=params)
+        body = gh.get(f"/repos/{owner}/{name}/pulls", params=params, repo=(owner, name))
         return [{"number": p["number"], "title": p["title"], "state": p["state"], "user": p["user"]["login"], "head": p["head"]["ref"]} for p in body]
 
     @mcp.tool()
@@ -331,7 +333,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         Use when you need PR metadata before merge, review, status checks, or
         follow-up comments.
         """
-        r = gh.get(f"/repos/{owner}/{name}/pulls/{number}")
+        r = gh.get(f"/repos/{owner}/{name}/pulls/{number}", repo=(owner, name))
         return {
             "number": r["number"],
             "title": r["title"],
@@ -383,7 +385,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
                 "per_page": min(cap, 100),
             }
         )
-        body = gh.get(f"/repos/{owner}/{name}/commits", params=params)
+        body = gh.get(f"/repos/{owner}/{name}/commits", params=params, repo=(owner, name))
         return [
             {
                 "sha": c["sha"],
@@ -406,7 +408,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
             payload["body"] = body
         if labels:
             payload["labels"] = labels
-        r = gh.post(f"/repos/{owner}/{name}/issues", json=payload)
+        r = gh.post(f"/repos/{owner}/{name}/issues", json=payload, repo=(owner, name))
         return {"number": r["number"], "html_url": r["html_url"], "state": r["state"]}
 
     @mcp.tool()
@@ -425,7 +427,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
             payload["state"] = state
         if labels is not None:
             payload["labels"] = labels
-        r = gh.patch(f"/repos/{owner}/{name}/issues/{number}", json=payload)
+        r = gh.patch(f"/repos/{owner}/{name}/issues/{number}", json=payload, repo=(owner, name))
         return {"number": r["number"], "state": r["state"], "html_url": r["html_url"]}
 
     @mcp.tool()
@@ -435,7 +437,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         Use to leave rollout updates, review notes, status summaries, or user
         feedback on either issue numbers or PR numbers.
         """
-        r = gh.post(f"/repos/{owner}/{name}/issues/{number}/comments", json={"body": body})
+        r = gh.post(f"/repos/{owner}/{name}/issues/{number}/comments", json={"body": body}, repo=(owner, name))
         return {"id": r["id"], "html_url": r["html_url"]}
 
     @mcp.tool()
@@ -445,7 +447,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         Use for triage, workflow triggers, ownership markers, or status labels.
         Returns the full label set after the add.
         """
-        r = gh.post(f"/repos/{owner}/{name}/issues/{number}/labels", json={"labels": labels})
+        r = gh.post(f"/repos/{owner}/{name}/issues/{number}/labels", json={"labels": labels}, repo=(owner, name))
         return [l["name"] for l in r]
 
     @mcp.tool()
@@ -455,7 +457,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         Use to clear triage, trigger, blocked, or status labels. Returns the
         remaining labels.
         """
-        r = gh.delete(f"/repos/{owner}/{name}/issues/{number}/labels/{label}")
+        r = gh.delete(f"/repos/{owner}/{name}/issues/{number}/labels/{label}", repo=(owner, name))
         return [l["name"] for l in r] if isinstance(r, list) else []
 
     @mcp.tool()
@@ -487,7 +489,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         payload: dict[str, Any] = {"name": label, "color": color}
         if description is not None:
             payload["description"] = description
-        r = gh.post(f"/repos/{owner}/{name}/labels", json=payload)
+        r = gh.post(f"/repos/{owner}/{name}/labels", json=payload, repo=(owner, name))
         return {
             "id": r["id"],
             "name": r["name"],
@@ -507,7 +509,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         payload: dict[str, Any] = {"title": title, "head": head, "base": base, "draft": draft}
         if body is not None:
             payload["body"] = body
-        r = gh.post(f"/repos/{owner}/{name}/pulls", json=payload)
+        r = gh.post(f"/repos/{owner}/{name}/pulls", json=payload, repo=(owner, name))
         return {"number": r["number"], "html_url": r["html_url"], "state": r["state"]}
 
     @mcp.tool()
@@ -522,7 +524,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
             payload["commit_title"] = commit_title
         if commit_message is not None:
             payload["commit_message"] = commit_message
-        r = gh.put(f"/repos/{owner}/{name}/pulls/{number}/merge", json=payload)
+        r = gh.put(f"/repos/{owner}/{name}/pulls/{number}/merge", json=payload, repo=(owner, name))
         return {"merged": r.get("merged", False), "sha": r.get("sha"), "message": r.get("message")}
 
     @mcp.tool()
@@ -537,7 +539,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
             payload["reviewers"] = reviewers
         if team_reviewers:
             payload["team_reviewers"] = team_reviewers
-        r = gh.post(f"/repos/{owner}/{name}/pulls/{number}/requested_reviewers", json=payload)
+        r = gh.post(f"/repos/{owner}/{name}/pulls/{number}/requested_reviewers", json=payload, repo=(owner, name))
         return {
             "requested_users": [u["login"] for u in r.get("requested_reviewers", [])],
             "requested_teams": [t["slug"] for t in r.get("requested_teams", [])],
@@ -558,7 +560,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         params = {"ref": branch} if branch else None
         sha: str | None = None
         try:
-            existing = gh.get(f"/repos/{owner}/{name}/contents/{path}", params=params)
+            existing = gh.get(f"/repos/{owner}/{name}/contents/{path}", params=params, repo=(owner, name))
             if isinstance(existing, dict) and "sha" in existing:
                 sha = existing["sha"]
         except httpx.HTTPStatusError as exc:
@@ -572,7 +574,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
             payload["branch"] = branch
         if sha is not None:
             payload["sha"] = sha
-        r = gh.put(f"/repos/{owner}/{name}/contents/{path}", json=payload)
+        r = gh.put(f"/repos/{owner}/{name}/contents/{path}", json=payload, repo=(owner, name))
         return {
             "path": r["content"]["path"],
             "sha": r["content"]["sha"],
@@ -588,13 +590,13 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         before the delete; the call fails if the file does not exist on `branch`
         (default branch if omitted)."""
         params = {"ref": branch} if branch else None
-        existing = gh.get(f"/repos/{owner}/{name}/contents/{path}", params=params)
+        existing = gh.get(f"/repos/{owner}/{name}/contents/{path}", params=params, repo=(owner, name))
         if not isinstance(existing, dict) or "sha" not in existing:
             raise RuntimeError(f"{path} is not a file or does not exist on {branch or 'default branch'}")
         payload: dict[str, Any] = {"message": message, "sha": existing["sha"]}
         if branch is not None:
             payload["branch"] = branch
-        r = gh.delete(f"/repos/{owner}/{name}/contents/{path}", json=payload)
+        r = gh.delete(f"/repos/{owner}/{name}/contents/{path}", json=payload, repo=(owner, name))
         return {"commit_sha": r["commit"]["sha"]}
 
     @mcp.tool()
@@ -608,9 +610,9 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         no `from_sha` parameter, because a caller-cached sha is exactly the
         affordance that lets a subsequent commit revert previous work by being
         based on a stale view of `base`."""
-        base_branch = gh.get(f"/repos/{owner}/{name}/branches/{base}")
+        base_branch = gh.get(f"/repos/{owner}/{name}/branches/{base}", repo=(owner, name))
         base_sha = base_branch["commit"]["sha"]
-        r = gh.post(f"/repos/{owner}/{name}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": base_sha})
+        r = gh.post(f"/repos/{owner}/{name}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": base_sha}, repo=(owner, name))
         return {"ref": r["ref"], "sha": r["object"]["sha"], "base": base, "base_sha": base_sha}
 
     @mcp.tool()
@@ -627,7 +629,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         covered by a 'restrict deletions' protection rule (422), so no extra
         guard is needed here — those failures surface as HTTPStatusError.
         Missing branches 422 with 'Reference does not exist'."""
-        gh.delete(f"/repos/{owner}/{name}/git/refs/heads/{branch}")
+        gh.delete(f"/repos/{owner}/{name}/git/refs/heads/{branch}", repo=(owner, name))
         return {"deleted": True, "branch": branch}
 
     @mcp.tool()
@@ -672,18 +674,20 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         if not files and not deletes:
             raise ValueError("commit_to_branch needs at least one file or one delete")
 
+        repo = (owner, name)
+
         branch_existed = True
         try:
-            b = gh.get(f"/repos/{owner}/{name}/branches/{branch}")
+            b = gh.get(f"/repos/{owner}/{name}/branches/{branch}", repo=repo)
             parent_sha = b["commit"]["sha"]
         except httpx.HTTPStatusError as exc:
             if not _is_404(exc):
                 raise
             branch_existed = False
-            b = gh.get(f"/repos/{owner}/{name}/branches/{base}")
+            b = gh.get(f"/repos/{owner}/{name}/branches/{base}", repo=repo)
             parent_sha = b["commit"]["sha"]
 
-        parent_commit = gh.get(f"/repos/{owner}/{name}/git/commits/{parent_sha}")
+        parent_commit = gh.get(f"/repos/{owner}/{name}/git/commits/{parent_sha}", repo=repo)
         base_tree_sha = parent_commit["tree"]["sha"]
 
         tree_entries: list[dict[str, Any]] = []
@@ -696,6 +700,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
                     "content": base64.b64encode(f["content"].encode("utf-8")).decode("ascii"),
                     "encoding": "base64",
                 },
+                repo=repo,
             )
             tree_entries.append({
                 "path": f["path"],
@@ -710,6 +715,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         new_tree = gh.post(
             f"/repos/{owner}/{name}/git/trees",
             json={"base_tree": base_tree_sha, "tree": tree_entries},
+            repo=repo,
         )
 
         commit_payload: dict[str, Any] = {
@@ -721,17 +727,19 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
             author_block = {"name": author_name, "email": author_email}
             commit_payload["author"] = author_block
             commit_payload["committer"] = author_block
-        new_commit = gh.post(f"/repos/{owner}/{name}/git/commits", json=commit_payload)
+        new_commit = gh.post(f"/repos/{owner}/{name}/git/commits", json=commit_payload, repo=repo)
 
         if branch_existed:
             ref = gh.patch(
                 f"/repos/{owner}/{name}/git/refs/heads/{branch}",
                 json={"sha": new_commit["sha"]},
+                repo=repo,
             )
         else:
             ref = gh.post(
                 f"/repos/{owner}/{name}/git/refs",
                 json={"ref": f"refs/heads/{branch}", "sha": new_commit["sha"]},
+                repo=repo,
             )
 
         return {
@@ -767,7 +775,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
             params["branch"] = branch
         if status:
             params["status"] = status
-        body = gh.get(f"/repos/{owner}/{name}/actions/workflows/{workflow}/runs", params=params)
+        body = gh.get(f"/repos/{owner}/{name}/actions/workflows/{workflow}/runs", params=params, repo=(owner, name))
         return [
             {
                 "id": r["id"],
@@ -817,6 +825,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         gh.post(
             f"/repos/{owner}/{name}/actions/workflows/{workflow}/dispatches",
             json=body,
+            repo=(owner, name),
         )
         # GitHub accepts the dispatch async — give it a moment to surface
         # in the runs list before we look it up. Non-fatal if we miss it.
@@ -826,6 +835,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
             runs = gh.get(
                 f"/repos/{owner}/{name}/actions/workflows/{workflow}/runs",
                 params={"branch": ref, "per_page": 1, "event": "workflow_dispatch"},
+                repo=(owner, name),
             )
             recent = runs.get("workflow_runs") or []
             if recent:
@@ -847,7 +857,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         Use after list_workflow_runs when tracking a specific CI/build/deploy
         run to completion.
         """
-        r = gh.get(f"/repos/{owner}/{name}/actions/runs/{run_id}")
+        r = gh.get(f"/repos/{owner}/{name}/actions/runs/{run_id}", repo=(owner, name))
         return {
             "id": r["id"],
             "head_sha": r["head_sha"],
@@ -879,7 +889,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         expanded result stays focused. Pass `step_conclusion=None` for all
         steps."""
         cap = _clamp_limit(limit, default=50)
-        body = gh.get(f"/repos/{owner}/{name}/actions/runs/{run_id}/jobs", params={"per_page": min(cap, 100)})
+        body = gh.get(f"/repos/{owner}/{name}/actions/runs/{run_id}/jobs", params={"per_page": min(cap, 100)}, repo=(owner, name))
         rows: list[dict[str, Any]] = []
         for j in body.get("jobs", [])[:cap]:
             steps = j.get("steps", [])
@@ -934,7 +944,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         Use list_workflow_run_jobs to find a job_id."""
         max_chars = max(1, min(int(max_chars), 200_000))
         try:
-            text = gh.get_text(f"/repos/{owner}/{name}/actions/jobs/{job_id}/logs")
+            text = gh.get_text(f"/repos/{owner}/{name}/actions/jobs/{job_id}/logs", repo=(owner, name))
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise RuntimeError(f"job {job_id} not found in {owner}/{name}")
@@ -971,7 +981,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         Use to find uploaded logs, reports, test results, screenshots, or build
         artifacts. Pair with
         get_workflow_run_artifact_files to download and inspect one."""
-        body = gh.get(f"/repos/{owner}/{name}/actions/runs/{run_id}/artifacts", params={"per_page": 100})
+        body = gh.get(f"/repos/{owner}/{name}/actions/runs/{run_id}/artifacts", params={"per_page": 100}, repo=(owner, name))
         return [
             {
                 "id": a["id"],
@@ -1008,7 +1018,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         import io
         import zipfile
         try:
-            zip_bytes = gh.get_bytes(f"/repos/{owner}/{name}/actions/artifacts/{artifact_id}/zip")
+            zip_bytes = gh.get_bytes(f"/repos/{owner}/{name}/actions/artifacts/{artifact_id}/zip", repo=(owner, name))
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise RuntimeError(f"artifact {artifact_id} not found in {owner}/{name}")
@@ -1066,7 +1076,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         settings. Requires the App to
         have 'variables: read' permission on its installation; without it this
         returns 403."""
-        body = gh.get(f"/repos/{owner}/{name}/actions/variables", params={"per_page": 100})
+        body = gh.get(f"/repos/{owner}/{name}/actions/variables", params={"per_page": 100}, repo=(owner, name))
         return [
             {"name": v["name"], "value": v["value"], "created_at": v.get("created_at"), "updated_at": v.get("updated_at")}
             for v in body.get("variables", [])
@@ -1079,7 +1089,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         Use to verify CI/CD configuration for a specific variable. Requires the App to
         have 'variables: read' permission. Raises on 404 if the variable is
         unset, which is a clean way to verify whether tofu wrote it."""
-        v = gh.get(f"/repos/{owner}/{name}/actions/variables/{variable_name}")
+        v = gh.get(f"/repos/{owner}/{name}/actions/variables/{variable_name}", repo=(owner, name))
         return {"name": v["name"], "value": v["value"], "created_at": v.get("created_at"), "updated_at": v.get("updated_at")}
 
     @mcp.tool()
@@ -1093,20 +1103,21 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         Vault instead."""
         path = f"/repos/{owner}/{name}/actions/variables/{variable_name}"
         try:
-            gh.get(path)
+            gh.get(path, repo=(owner, name))
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
                 raise
             gh.post(
                 f"/repos/{owner}/{name}/actions/variables",
                 json={"name": variable_name, "value": value},
+                repo=(owner, name),
             )
             action = "created"
         else:
-            gh.patch(path, json={"name": variable_name, "value": value})
+            gh.patch(path, json={"name": variable_name, "value": value}, repo=(owner, name))
             action = "updated"
 
-        v = gh.get(path)
+        v = gh.get(path, repo=(owner, name))
         return {
             "action": action,
             "name": v["name"],

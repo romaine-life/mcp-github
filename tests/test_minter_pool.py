@@ -125,3 +125,66 @@ def test_partial_tank_op_keys_treated_as_disabled() -> None:
         email="alice@example.test", installation_id=42, is_host=False
     )
     assert pool.for_caller(caller) is host
+
+
+# ---------------------------------------------------------------------------
+# Cross-installation repo-access cache
+# ---------------------------------------------------------------------------
+
+
+def test_host_property_returns_host_minter() -> None:
+    pool, host = _enabled_pool()
+    assert pool.host is host
+
+
+def test_for_caller_repo_returns_user_minter_when_accessible() -> None:
+    pool, host = _enabled_pool()
+    caller = CallerIdentity(email="alice@example.test", installation_id=42, is_host=False)
+    minter = pool.for_caller_repo(caller, ("nelsong6", "tank-operator"))
+    assert minter is not host
+    assert minter._installation_id == "42"
+
+
+def test_for_caller_repo_returns_host_when_cached_inaccessible() -> None:
+    pool, host = _enabled_pool()
+    caller = CallerIdentity(email="alice@example.test", installation_id=42, is_host=False)
+    pool.record_repo_inaccessible(caller, "nelsong6", "tank-operator")
+    assert pool.for_caller_repo(caller, ("nelsong6", "tank-operator")) is host
+
+
+def test_for_caller_repo_host_caller_unaffected_by_inaccessible_cache() -> None:
+    """Host callers already use the host minter; the repo cache should not
+    interfere and should not create false 'inaccessible' entries."""
+    pool, host = _enabled_pool()
+    host_caller = CallerIdentity(email="host@example.test", installation_id=1, is_host=True)
+    pool.record_repo_inaccessible(host_caller, "nelsong6", "tank-operator")
+    assert pool.caller_can_serve_repo(host_caller, "nelsong6", "tank-operator") is True
+
+
+def test_caller_can_serve_repo_optimistic_for_unknown() -> None:
+    pool, _ = _enabled_pool()
+    caller = CallerIdentity(email="alice@example.test", installation_id=42, is_host=False)
+    assert pool.caller_can_serve_repo(caller, "owner", "repo") is True
+
+
+def test_caller_can_serve_repo_false_after_record() -> None:
+    pool, _ = _enabled_pool()
+    caller = CallerIdentity(email="alice@example.test", installation_id=42, is_host=False)
+    pool.record_repo_inaccessible(caller, "owner", "repo")
+    assert pool.caller_can_serve_repo(caller, "owner", "repo") is False
+
+
+def test_repo_access_cache_is_case_insensitive() -> None:
+    pool, _ = _enabled_pool()
+    caller = CallerIdentity(email="alice@example.test", installation_id=42, is_host=False)
+    pool.record_repo_inaccessible(caller, "NelsonG6", "Tank-Operator")
+    assert pool.caller_can_serve_repo(caller, "nelsong6", "tank-operator") is False
+
+
+def test_repo_access_cache_scoped_per_installation() -> None:
+    """Alice's cache entry does not affect Bob's routing."""
+    pool, _ = _enabled_pool()
+    alice = CallerIdentity(email="alice@example.test", installation_id=42, is_host=False)
+    bob = CallerIdentity(email="bob@example.test", installation_id=99, is_host=False)
+    pool.record_repo_inaccessible(alice, "nelsong6", "tank-operator")
+    assert pool.caller_can_serve_repo(bob, "nelsong6", "tank-operator") is True
