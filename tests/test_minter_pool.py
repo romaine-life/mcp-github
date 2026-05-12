@@ -147,9 +147,23 @@ def test_for_caller_repo_returns_user_minter_when_accessible() -> None:
 
 def test_for_caller_repo_returns_host_when_cached_inaccessible() -> None:
     pool, host = _enabled_pool()
-    caller = CallerIdentity(email="alice@example.test", installation_id=42, is_host=False)
+    caller = CallerIdentity(
+        email="admin@example.test",
+        installation_id=42,
+        is_host=False,
+        is_super_admin=True,
+    )
     pool.record_repo_inaccessible(caller, "nelsong6", "tank-operator")
     assert pool.for_caller_repo(caller, ("nelsong6", "tank-operator")) is host
+
+
+def test_for_caller_repo_ignores_inaccessible_cache_for_normal_user() -> None:
+    pool, host = _enabled_pool()
+    caller = CallerIdentity(email="alice@example.test", installation_id=42, is_host=False)
+    pool.record_repo_inaccessible(caller, "nelsong6", "tank-operator")
+    minter = pool.for_caller_repo(caller, ("nelsong6", "tank-operator"))
+    assert minter is not host
+    assert minter._installation_id == "42"
 
 
 def test_for_caller_repo_host_caller_unaffected_by_inaccessible_cache() -> None:

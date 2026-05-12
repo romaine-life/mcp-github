@@ -41,6 +41,9 @@ from __future__ import annotations
 import logging
 import time
 from threading import Lock
+from typing import Any
+
+import httpx
 
 from .auth import GitHubAppTokenMinter
 from .caller import CallerIdentity
@@ -166,9 +169,68 @@ class MinterPool:
         confirms the caller's installation can't serve this repo, saving
         a doomed round-trip. Otherwise delegates to ``for_caller``.
         """
-        if repo is not None and not self.caller_can_serve_repo(caller, *repo):
+        if (
+            repo is not None
+            and caller is not None
+            and caller.is_super_admin
+            and not self.caller_can_serve_repo(caller, *repo)
+        ):
             return self._host
         return self.for_caller(caller)
+
+    def user_app_minter(self, installation_id: int) -> GitHubAppTokenMinter:
+        """Return a minter for a specific user-facing App installation.
+
+        Caller authorization is intentionally handled by GitHubClient/tool
+        methods before this is called. This method only centralizes minter
+        caching and config validation.
+        """
+        if not self._tank_op_enabled:
+            raise RuntimeError("user-facing GitHub App credentials are not configured")
+        with self._lock:
+            cached = self._cache.get(installation_id)
+            if cached is not None:
+                return cached
+            minter = GitHubAppTokenMinter(
+                self._tank_op_app_id,  # type: ignore[arg-type]
+                str(installation_id),
+                self._tank_op_private_key,  # type: ignore[arg-type]
+            )
+            self._cache[installation_id] = minter
+            return minter
+
+    def list_user_app_installations(self) -> list[dict[str, Any]]:
+        """List installations for the user-facing Tank GitHub App."""
+        if not self._tank_op_enabled:
+            raise RuntimeError("user-facing GitHub App credentials are not configured")
+        assert self._tank_op_app_id is not None
+        assert self._tank_op_private_key is not None
+        token = GitHubAppTokenMinter.app_jwt(
+            self._tank_op_app_id,
+            self._tank_op_private_key,
+        )
+        rows: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            r = httpx.get(
+                "https://api.github.com/app/installations",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                params={"per_page": 100, "page": page},
+                timeout=15.0,
+            )
+            r.raise_for_status()
+            body = r.json()
+            if not body:
+                break
+            rows.extend(body)
+            if len(body) < 100:
+                break
+            page += 1
+        return rows
 
     @property
     def tank_operator_app_enabled(self) -> bool:

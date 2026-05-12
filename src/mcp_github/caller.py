@@ -80,9 +80,11 @@ class CallerIdentity:
     email: str
     installation_id: int | None
     is_host: bool
+    is_super_admin: bool = False
 
     @classmethod
     def from_dict(cls, body: dict[str, Any]) -> "CallerIdentity":
+        is_host = bool(body.get("is_host", False))
         return cls(
             email=str(body.get("email", "")).lower(),
             installation_id=(
@@ -90,7 +92,10 @@ class CallerIdentity:
                 if body.get("installation_id") is not None
                 else None
             ),
-            is_host=bool(body.get("is_host", False)),
+            is_host=is_host,
+            # Older orchestrators do not send is_super_admin. Treat host as
+            # super-admin for compatibility with the pre-explicit-role model.
+            is_super_admin=bool(body.get("is_super_admin", is_host)),
         )
 
 

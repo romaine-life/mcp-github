@@ -43,11 +43,17 @@ def _pool(*, app_enabled: bool = True) -> tuple[MinterPool, GitHubAppTokenMinter
     return pool, host
 
 
-def _caller(*, is_host: bool = False, installation_id: int | None = 42) -> CallerIdentity:
+def _caller(
+    *,
+    is_host: bool = False,
+    installation_id: int | None = 42,
+    is_super_admin: bool = False,
+) -> CallerIdentity:
     return CallerIdentity(
         email="alice@example.test",
         installation_id=installation_id,
         is_host=is_host,
+        is_super_admin=is_super_admin,
     )
 
 
@@ -146,7 +152,7 @@ def test_pool_host_caller_always_can_serve() -> None:
 
 def test_for_caller_repo_returns_host_when_inaccessible() -> None:
     pool, host = _pool()
-    caller = _caller()
+    caller = _caller(is_super_admin=True)
     pool.record_repo_inaccessible(caller, "nelsong6", "tank-operator")
     minter = pool.for_caller_repo(caller, ("nelsong6", "tank-operator"))
     assert minter is host
@@ -199,7 +205,7 @@ def test_get_uses_user_minter_when_repo_accessible() -> None:
 
 def test_get_falls_back_to_host_on_404_and_primes_cache() -> None:
     pool, host = _pool()
-    caller = _caller()
+    caller = _caller(is_super_admin=True)
     client = _client(pool)
 
     user_minter = pool.for_caller(caller)
@@ -231,7 +237,7 @@ def test_get_falls_back_to_host_on_404_and_primes_cache() -> None:
 
 def test_get_falls_back_on_403_resource_not_accessible() -> None:
     pool, host = _pool()
-    caller = _caller()
+    caller = _caller(is_super_admin=True)
     client = _client(pool)
 
     user_minter = pool.for_caller(caller)
@@ -263,9 +269,38 @@ def test_get_falls_back_on_403_resource_not_accessible() -> None:
     assert not pool.caller_can_serve_repo(caller, "nelsong6", "tank-operator")
 
 
-def test_subsequent_call_skips_user_install_when_cached() -> None:
+def test_normal_user_does_not_fall_back_to_host_on_404() -> None:
     pool, host = _pool()
     caller = _caller()
+    client = _client(pool)
+
+    user_minter = pool.for_caller(caller)
+    _token_for(user_minter, "user-tok")
+    _token_for(host, "host-tok")
+
+    call_tokens: list[str] = []
+
+    def fake_get(url, *, headers, params, timeout):
+        tok = headers["Authorization"].split()[1]
+        call_tokens.append(tok)
+        req = httpx.Request("GET", url)
+        return httpx.Response(404, text='{"message":"Not Found"}', request=req)
+
+    token = CALLER.set(caller)
+    try:
+        with patch("mcp_github.github_client.httpx.get", side_effect=fake_get):
+            with pytest.raises(httpx.HTTPStatusError):
+                client.get("/repos/nelsong6/tank-operator", repo=("nelsong6", "tank-operator"))
+    finally:
+        CALLER.reset(token)
+
+    assert call_tokens == ["user-tok"]
+    assert pool.caller_can_serve_repo(caller, "nelsong6", "tank-operator")
+
+
+def test_subsequent_call_skips_user_install_when_cached() -> None:
+    pool, host = _pool()
+    caller = _caller(is_super_admin=True)
     client = _client(pool)
 
     user_minter = pool.for_caller(caller)
@@ -293,7 +328,7 @@ def test_subsequent_call_skips_user_install_when_cached() -> None:
 
 def test_both_fail_raises_original_404() -> None:
     pool, host = _pool()
-    caller = _caller()
+    caller = _caller(is_super_admin=True)
     client = _client(pool)
 
     user_minter = pool.for_caller(caller)
@@ -379,7 +414,7 @@ def test_no_repo_kwarg_raises_without_retry() -> None:
 
 def test_mint_scoped_token_falls_back_to_host_on_422() -> None:
     pool, host = _pool()
-    caller = _caller()
+    caller = _caller(is_super_admin=True)
     client = _client(pool)
 
     user_minter = pool.for_caller(caller)
@@ -415,7 +450,7 @@ def test_mint_scoped_token_falls_back_to_host_on_422() -> None:
 
 def test_mint_scoped_token_no_fallback_when_host_also_fails() -> None:
     pool, host = _pool()
-    caller = _caller()
+    caller = _caller(is_super_admin=True)
     client = _client(pool)
 
     user_minter = pool.for_caller(caller)

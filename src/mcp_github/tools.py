@@ -31,6 +31,133 @@ def _is_404(exc: Exception) -> bool:
 
 def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
     @mcp.tool()
+    def list_user_app_installations(limit: int | None = None) -> dict[str, Any]:
+        """Super-admin only: list installations of the user-facing Tank GitHub App."""
+        cap = _clamp_limit(limit, default=100) if limit is not None else None
+        installs = gh.list_user_app_installations()
+        rows = [
+            {
+                "installation_id": install["id"],
+                "account_login": (install.get("account") or {}).get("login"),
+                "account_type": (install.get("account") or {}).get("type"),
+                "repository_selection": install.get("repository_selection"),
+            }
+            for install in installs
+        ]
+        returned_rows = rows[:cap] if cap is not None else rows
+        truncated = cap is not None and len(rows) > cap
+        return {
+            "installations": returned_rows,
+            "count": len(returned_rows),
+            "total_count": len(rows),
+            "truncated": truncated,
+            "has_more": truncated,
+            "limit": cap,
+        }
+
+    @mcp.tool()
+    def list_repos_for_installation(
+        installation_id: int,
+        owner: str | None = None,
+        name_contains: str | None = None,
+        visibility: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Super-admin only: list repositories visible to a specific user-facing App installation."""
+        cap = _clamp_limit(limit, default=100) if limit is not None else None
+        rows = gh.list_repos_for_installation(
+            int(installation_id),
+            owner=owner,
+            name_contains=name_contains,
+            visibility=visibility,
+        )
+        returned_rows = rows[:cap] if cap is not None else rows
+        truncated = cap is not None and len(rows) > cap
+        return {
+            "repositories": returned_rows,
+            "count": len(returned_rows),
+            "total_count": len(rows),
+            "truncated": truncated,
+            "has_more": truncated,
+            "limit": cap,
+        }
+
+    @mcp.tool()
+    def list_all_user_installation_repos(
+        owner: str | None = None,
+        name_contains: str | None = None,
+        visibility: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Super-admin only: list repositories across all user-facing App installations."""
+        cap = _clamp_limit(limit, default=100) if limit is not None else None
+        rows: list[dict[str, Any]] = []
+        installs = gh.list_user_app_installations()
+        for install in installs:
+            installation_id = int(install["id"])
+            account = install.get("account") or {}
+            repos = gh.list_repos_for_installation(
+                installation_id,
+                owner=owner,
+                name_contains=name_contains,
+                visibility=visibility,
+            )
+            for repo in repos:
+                rows.append(
+                    {
+                        **repo,
+                        "account_login": account.get("login"),
+                        "account_type": account.get("type"),
+                    }
+                )
+                if cap is not None and len(rows) >= cap:
+                    return {
+                        "repositories": rows,
+                        "count": len(rows),
+                        "total_count": len(rows),
+                        "truncated": True,
+                        "has_more": True,
+                        "limit": cap,
+                    }
+        return {
+            "repositories": rows,
+            "count": len(rows),
+            "total_count": len(rows),
+            "truncated": False,
+            "has_more": False,
+            "limit": cap,
+        }
+
+    @mcp.tool()
+    def mint_clone_token_for_installation(
+        installation_id: int,
+        repos: list[str],
+        write: bool = False,
+        workflows: bool = False,
+    ) -> dict[str, str]:
+        """Super-admin only: mint a clone token from a specific user-facing App installation."""
+        if not repos:
+            raise ValueError("repos must contain at least one owner/name")
+        repo_names: list[str] = []
+        for full in repos:
+            if "/" not in full:
+                raise ValueError(f"repo must be owner/name: {full!r}")
+            _, name = full.split("/", 1)
+            repo_names.append(name)
+
+        permissions = {"contents": "write" if write else "read", "metadata": "read"}
+        if workflows:
+            if not write:
+                raise ValueError("workflows=True requires write=True")
+            permissions["workflows"] = "write"
+        token, expires = gh.mint_scoped_token_for_installation(
+            int(installation_id),
+            repositories=repo_names,
+            permissions=permissions,
+        )
+        return {"token": token, "expires_at": expires}
+
+    @mcp.tool()
     def list_installation_repos(
         owner: str | None = None,
         name_contains: str | None = None,

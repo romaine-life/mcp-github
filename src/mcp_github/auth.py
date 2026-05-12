@@ -20,6 +20,15 @@ class GitHubAppTokenMinter:
         self._token: str | None = None
         self._expires_at: float = 0.0
 
+    @staticmethod
+    def app_jwt(app_id: str, private_key: str) -> str:
+        now = int(time.time())
+        return jwt.encode(
+            {"iat": now - 60, "exp": now + 540, "iss": app_id},
+            private_key,
+            algorithm="RS256",
+        )
+
     def installation_token(self) -> str:
         with self._lock:
             if self._token and self._expires_at - time.time() > 300:
@@ -28,12 +37,7 @@ class GitHubAppTokenMinter:
             return self._token
 
     def _fetch(self) -> tuple[str, float]:
-        now = int(time.time())
-        app_jwt = jwt.encode(
-            {"iat": now - 60, "exp": now + 540, "iss": self._app_id},
-            self._private_key,
-            algorithm="RS256",
-        )
+        app_jwt = self.app_jwt(self._app_id, self._private_key)
         r = httpx.post(
             f"https://api.github.com/app/installations/{self._installation_id}/access_tokens",
             headers={
@@ -64,12 +68,7 @@ class GitHubAppTokenMinter:
         per the GH API contract. `permissions` may only subset the App's
         granted permissions; passing a higher level than the App holds 422s.
         """
-        now = int(time.time())
-        app_jwt = jwt.encode(
-            {"iat": now - 60, "exp": now + 540, "iss": self._app_id},
-            self._private_key,
-            algorithm="RS256",
-        )
+        app_jwt = self.app_jwt(self._app_id, self._private_key)
         payload: dict[str, Any] = {}
         if repositories is not None:
             payload["repositories"] = repositories
