@@ -6,7 +6,7 @@
 
 image:
   repository: romainecr.azurecr.io/mcp-github
-  tag: "e554c3c"
+  tag: "bdda899"
   pullPolicy: IfNotPresent
 
 port: 8080
