@@ -1,7 +1,7 @@
 [project]
 name = "mcp-github"
 version = "0.1.0"
-description = "Custom GitHub MCP server — kube-rbac-proxy fronts auth, shared GitHub App install behind."
+description = "Tank-bound GitHub MCP server with Tank session attestation auth."
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.18.0",
@@ -20,5 +20,4 @@ build-backend = "hatchling.build"
 packages = ["src/mcp_github"]
 
 [project.scripts]
-mcp-github-stdio = "mcp_github.stdio:main"
 mcp-github-http = "mcp_github.http:main"
