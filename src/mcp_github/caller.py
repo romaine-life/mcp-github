@@ -1,73 +1,32 @@
-"""Per-request caller resolution for #57 stage 3.
+"""Tank session attestation authentication for HTTP MCP requests.
 
-The HTTP MCP server fronts a single GitHub App, but the *App* identity
-that every tool call mints from used to be the same for every session
-pod (the host's romaine-life-app installation). Stage 3 wires the
-caller's email + GitHub installation through to each tool so PRs,
-issues, comments, and clone tokens are attributed to the right
-installation.
-
-Mechanics:
-
-1. ``kube-rbac-proxy`` validates the inbound K8s SA token (binary
-   pass/fail; the SA name itself is shared across all session pods).
-2. A Starlette middleware (`http.py`) reads the source pod IP off
-   ``X-Forwarded-For`` (kube-rbac-proxy is a thin Go reverse proxy and
-   the Python upstream is loopback, so the *last* hop in the chain is
-   what reached us — that's the session pod's pod IP).
-3. The middleware calls ``GET tank-operator-orchestrator/api/internal/
-   resolve-caller?pod_ip=<ip>`` (auth: this pod's projected SA token,
-   accepted by the orchestrator's TokenReview gate). The response is
-   the email, GitHub App installation_id, and an ``is_host`` flag.
-4. The middleware stashes the result in a ``ContextVar`` so each
-   ``@mcp.tool()`` body can call ``current_caller()`` without
-   threading a request object through every tool signature.
-
-Failure mode: anything that goes wrong in steps 2/3 fails the request.
-Caller identity is part of the security boundary; callers should not
-silently fall back to another installation just because resolution broke.
+The GitHub MCP server is Tank-bound. Session pods do not call this
+server with Kubernetes ServiceAccount identity; their local
+``mcp-auth-proxy`` exchanges the pod token with Tank for a short-lived
+RS256 JWT whose audience is ``mcp-github-tank``. This module verifies
+that attestation and binds the caller identity to a ContextVar for the
+tool layer.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import time
-from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
-from pathlib import Path
-from threading import Lock
 from typing import Any
 
-import httpx
+import jwt
+from jwt import InvalidTokenError, PyJWKClient
 
 log = logging.getLogger(__name__)
 
-ORCHESTRATOR_URL = os.environ.get(
-    "ORCHESTRATOR_INTERNAL_URL",
-    "http://tank-operator.tank-operator.svc:80",
+TANK_JWKS_URL = os.environ.get(
+    "TANK_OPERATOR_JWKS_URL",
+    "http://tank-operator.tank-operator.svc.cluster.local/api/internal/jwks",
 )
-ORCHESTRATOR_URLS = tuple(
-    url.strip().rstrip("/")
-    for url in os.environ.get("ORCHESTRATOR_INTERNAL_URLS", ORCHESTRATOR_URL).split(",")
-    if url.strip()
-)
-# Audience-scoped token path. The chart projects a token minted with
-# audience "tank-operator" so the orchestrator can reject tokens not
-# intended for it.
-SA_TOKEN_PATH = os.environ.get("TANK_OPERATOR_SA_TOKEN_PATH", "")
-FALLBACK_SA_TOKEN_PATH = os.environ.get(
-    "FALLBACK_SA_TOKEN_PATH",
-    "/var/run/secrets/kubernetes.io/serviceaccount/token",
-)
-RESOLVE_TIMEOUT_SECONDS = float(os.environ.get("CALLER_RESOLVE_TIMEOUT", "3.0"))
-# Caller-resolution cache TTL. The orchestrator lookup is cheap, but caching
-# keeps a session pod's tool burst from amplifying into N internal-API
-# round-trips. Short enough that a fresh GitHub App install (which mutates
-# installation_id on the profile) gets picked up within a few minutes
-# without a server restart.
-CACHE_TTL_SECONDS = float(os.environ.get("CALLER_RESOLVE_TTL", "300"))
+TANK_JWT_ISSUER = os.environ.get("TANK_OPERATOR_JWT_ISSUER", "tank-operator")
+TANK_JWT_AUDIENCE = os.environ.get("TANK_OPERATOR_JWT_AUDIENCE", "mcp-github-tank")
 
 
 @dataclass(frozen=True)
@@ -76,179 +35,109 @@ class CallerIdentity:
     installation_id: int | None
     is_host: bool
     is_super_admin: bool = False
+    session_scope: str = ""
+    session_id: str = ""
+    pod_name: str = ""
 
     @classmethod
-    def from_dict(cls, body: dict[str, Any]) -> "CallerIdentity":
-        is_host = bool(body.get("is_host", False))
+    def from_claims(cls, claims: dict[str, Any]) -> "CallerIdentity":
+        email = _required_string(claims, "owner_email").lower()
+        session_scope = _required_string(claims, "session_scope")
+        session_id = _required_string(claims, "session_id")
+        pod_name = _required_string(claims, "pod_name")
+        is_host = _required_bool(claims, "is_host")
+        is_super_admin = _required_bool(claims, "is_super_admin")
+        installation_id = _optional_int(claims, "github_installation_id")
+        if not is_host and installation_id is None:
+            raise CallerAuthError("Tank attestation missing GitHub installation")
         return cls(
-            email=str(body.get("email", "")).lower(),
-            installation_id=(
-                int(body["installation_id"])
-                if body.get("installation_id") is not None
-                else None
-            ),
+            email=email,
+            installation_id=installation_id,
             is_host=is_host,
-            is_super_admin=bool(body.get("is_super_admin", False)),
+            is_super_admin=is_super_admin,
+            session_scope=session_scope,
+            session_id=session_id,
+            pod_name=pod_name,
         )
 
 
-class CallerResolutionError(RuntimeError):
-    """Caller identity could not be established for the request."""
+class CallerAuthError(RuntimeError):
+    """Caller identity could not be authenticated for the request."""
 
 
 CALLER: ContextVar[CallerIdentity | None] = ContextVar("mcp_github_caller", default=None)
 
 
 def current_caller() -> CallerIdentity | None:
-    """Return the caller identity for the in-flight MCP request, or None.
-
-    ``None`` is only expected outside proxied MCP requests, such as
-    process-local tests that set the context directly.
-    """
+    """Return the caller identity for the in-flight MCP request, or None."""
     return CALLER.get()
 
 
-class CallerResolver:
-    """Calls the orchestrator's ``/api/internal/resolve-caller`` with a
-    short TTL cache.
-
-    Runs sync inside the async middleware via ``httpx.Client`` instead
-    of ``AsyncClient`` so the resolver doesn't have to own its own
-    event-loop bookkeeping; the middleware is the only caller and it
-    awaits us via ``run_in_threadpool``-style boundaries are not
-    involved (Starlette middleware is async, but a sync httpx call
-    inside it is fine — the lookup is a single sub-second round-trip).
-    """
-
+class TankJWTAuthenticator:
     def __init__(
         self,
-        orchestrator_url: str = ORCHESTRATOR_URL,
-        orchestrator_urls: Sequence[str] | None = None,
-        sa_token_path: str = SA_TOKEN_PATH,
-        fallback_sa_token_path: str = FALLBACK_SA_TOKEN_PATH,
-        cache_ttl_seconds: float = CACHE_TTL_SECONDS,
+        *,
+        jwks_url: str = TANK_JWKS_URL,
+        issuer: str = TANK_JWT_ISSUER,
+        audience: str = TANK_JWT_AUDIENCE,
+        jwks_client: PyJWKClient | None = None,
     ) -> None:
-        if orchestrator_urls is not None:
-            urls = orchestrator_urls
-        elif orchestrator_url != ORCHESTRATOR_URL:
-            urls = (orchestrator_url,)
-        else:
-            urls = ORCHESTRATOR_URLS
-        if not urls:
-            urls = (orchestrator_url,)
-        self._urls = tuple(url.rstrip("/") for url in urls if url.rstrip("/"))
-        self._sa_token_path = Path(sa_token_path)
-        self._fallback_sa_token_path = Path(fallback_sa_token_path)
-        self._cache_ttl = cache_ttl_seconds
-        self._cache: dict[str, tuple[CallerIdentity | None, float]] = {}
-        self._lock = Lock()
+        self._issuer = issuer
+        self._audience = audience
+        self._jwks_client = jwks_client or PyJWKClient(jwks_url)
 
-    def _read_token(self, path: Path) -> str | None:
+    def authenticate(self, authorization: str | None) -> CallerIdentity:
+        token = _bearer_token(authorization)
         try:
-            return path.read_text().strip()
-        except OSError:
-            log.warning("could not read SA token at %s", path)
-            return None
-
-    def _token_candidates(self) -> list[tuple[str, str]]:
-        tokens: list[tuple[str, str]] = []
-        primary = self._read_token(self._sa_token_path)
-        if primary:
-            tokens.append((str(self._sa_token_path), primary))
-        fallback = self._read_token(self._fallback_sa_token_path)
-        if fallback and fallback != primary:
-            tokens.append((str(self._fallback_sa_token_path), fallback))
-        return tokens
-
-    async def resolve(self, pod_ip: str) -> CallerIdentity:
-        if not pod_ip:
-            raise CallerResolutionError("missing source pod IP")
-        with self._lock:
-            cached = self._cache.get(pod_ip)
-        if cached is not None:
-            value, expires_at = cached
-            if expires_at > time.time():
-                return value
-
-        token_candidates = self._token_candidates()
-        if not token_candidates:
-            raise CallerResolutionError(f"could not read SA token at {self._sa_token_path}")
-
-        saw_not_found = False
-        for url in self._urls:
-            for token_path, token in token_candidates:
-                try:
-                    async with httpx.AsyncClient(timeout=RESOLVE_TIMEOUT_SECONDS) as client:
-                        resp = await client.get(
-                            f"{url}/api/internal/resolve-caller",
-                            params={"pod_ip": pod_ip},
-                            headers={"Authorization": f"Bearer {token}"},
-                        )
-                except httpx.HTTPError as exc:
-                    log.warning(
-                        "orchestrator resolve-caller failed for %s via %s using %s: %s",
-                        pod_ip,
-                        url,
-                        token_path,
-                        exc,
-                    )
-                    continue
-
-                if resp.status_code == 401 and token_path != token_candidates[-1][0]:
-                    continue
-                if resp.status_code == 404:
-                    saw_not_found = True
-                    break
-                if resp.status_code == 200:
-                    try:
-                        value = CallerIdentity.from_dict(resp.json())
-                    except Exception:  # noqa: BLE001 - payload details are logged below
-                        log.warning(
-                            "malformed resolve-caller body from %s: %s",
-                            url,
-                            resp.text[:200],
-                        )
-                        raise CallerResolutionError("malformed resolve-caller body") from None
-                    break
-
-                log.warning(
-                    "orchestrator resolve-caller %s for %s via %s using %s: %s",
-                    resp.status_code,
-                    pod_ip,
-                    url,
-                    token_path,
-                    resp.text[:200],
-                )
-                raise CallerResolutionError(
-                    f"orchestrator resolve-caller returned {resp.status_code}"
-                )
-            else:
-                continue
-            if resp.status_code == 200:
-                break
-        else:
-            if saw_not_found:
-                raise CallerResolutionError(f"no session pod with IP {pod_ip}")
-            raise CallerResolutionError("orchestrator resolve-caller request failed")
-
-        with self._lock:
-            self._cache[pod_ip] = (value, time.time() + self._cache_ttl)
-        return value
+            signing_key = self._jwks_client.get_signing_key_from_jwt(token).key
+            claims = jwt.decode(
+                token,
+                signing_key,
+                algorithms=["RS256"],
+                audience=self._audience,
+                issuer=self._issuer,
+                leeway=10,
+                options={"require": ["exp", "iat", "nbf", "iss", "aud", "sub"]},
+            )
+        except InvalidTokenError as exc:
+            raise CallerAuthError("invalid Tank session attestation") from exc
+        except Exception as exc:
+            log.warning("Tank session attestation verification failed: %s", exc)
+            raise CallerAuthError("could not verify Tank session attestation") from exc
+        return CallerIdentity.from_claims(claims)
 
 
-def extract_source_pod_ip(forwarded_for: str | None, peer_ip: str | None) -> str | None:
-    """Pick the session pod's IP off the X-Forwarded-For chain.
+def _bearer_token(authorization: str | None) -> str:
+    if authorization is None:
+        raise CallerAuthError("missing Authorization header")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        raise CallerAuthError("missing bearer token")
+    return token.strip()
 
-    kube-rbac-proxy fronts our Python upstream on loopback; it's a Go
-    ``httputil.ReverseProxy`` underneath, which appends the immediate
-    peer to ``X-Forwarded-For`` before forwarding. So the *last* hop
-    is the IP that reached the proxy from outside the pod — i.e. the
-    session pod's IP. ``peer_ip`` is the upstream's view (always
-    127.0.0.1 in production), kept here for unit-test injection.
-    """
-    if forwarded_for:
-        # Right-most entry was added by our front proxy; trust it.
-        last = forwarded_for.split(",")[-1].strip()
-        if last:
-            return last
-    return peer_ip
+
+def _required_string(claims: dict[str, Any], name: str) -> str:
+    value = claims.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise CallerAuthError(f"Tank attestation missing {name}")
+    return value.strip()
+
+
+def _required_bool(claims: dict[str, Any], name: str) -> bool:
+    value = claims.get(name)
+    if not isinstance(value, bool):
+        raise CallerAuthError(f"Tank attestation missing {name}")
+    return value
+
+
+def _optional_int(claims: dict[str, Any], name: str) -> int | None:
+    value = claims.get(name)
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise CallerAuthError(f"Tank attestation has invalid {name}") from exc
+    if parsed <= 0:
+        raise CallerAuthError(f"Tank attestation has invalid {name}")
+    return parsed

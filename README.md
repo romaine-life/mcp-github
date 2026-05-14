@@ -1,6 +1,10 @@
 # mcp-github
 
-GitHub App-backed MCP server for Tank sessions.
+Tank-bound GitHub App MCP server for Tank sessions.
+
+Incoming MCP requests must carry a Tank-signed session attestation with
+audience `mcp-github-tank`. The agent-facing MCP server name remains
+`github`; the implementation is intentionally Tank-specific.
 
 ## Layout
 

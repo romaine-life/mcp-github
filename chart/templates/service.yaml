@@ -10,4 +10,4 @@ spec:
   ports:
     - name: http
       port: 80
-      targetPort: proxy
+      targetPort: http

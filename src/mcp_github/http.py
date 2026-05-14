@@ -1,18 +1,10 @@
-"""HTTP entrypoint — streamable-http transport.
+"""HTTP entrypoint for Tank's GitHub MCP server.
 
-Auth is handled by kube-rbac-proxy in front of this process: clients present
-a K8s SA token, the proxy validates it via TokenReview + SubjectAccessReview,
-and only authorized requests reach this server. Binding loopback so direct
-pod-IP:8080 access bypasses nothing — only the proxy can talk to us.
-
-Outgoing GitHub auth is caller-scoped. A Starlette middleware below
-recovers the source session pod's IP from
-``X-Forwarded-For``, asks the orchestrator's
-``/api/internal/resolve-caller`` for the caller's email +
-installation_id, and stashes it in a ContextVar. The MinterPool reads
-that on each tool call to pick the right App installation. Resolution
-must succeed for proxied MCP requests; caller identity is part of the
-security boundary.
+Incoming auth is a Tank-signed session attestation. The session pod's
+local mcp-auth-proxy gets that JWT from Tank and forwards it as bearer
+auth to this service. The middleware verifies the JWT, stashes the
+caller in a ContextVar, and the tool layer picks the right GitHub App
+installation for each request.
 """
 
 import logging
@@ -29,7 +21,7 @@ from starlette.responses import Response
 from starlette.routing import Mount, Route
 
 from .auth import GitHubAppTokenMinter
-from .caller import CALLER, CallerResolutionError, CallerResolver, extract_source_pod_ip
+from .caller import CALLER, CallerAuthError, TankJWTAuthenticator
 from .github_client import GitHubClient
 from .minter_pool import MinterPool
 from .tools import register_tools
@@ -44,32 +36,21 @@ def _req(name: str) -> str:
     return v
 
 
-class CallerResolutionMiddleware(BaseHTTPMiddleware):
-    """Resolve the caller per request and bind it to the ContextVar.
+class CallerAuthMiddleware(BaseHTTPMiddleware):
+    """Authenticate the Tank caller per request and bind it to the ContextVar."""
 
-    Sits in front of the FastMCP-mounted streamable-http app so every
-    JSON-RPC request gets its caller stamped before any tool runs. Both
-    success and failure paths reset the contextvar token so we don't
-    leak state into pooled async tasks.
-    """
-
-    def __init__(self, app, resolver: CallerResolver) -> None:
+    def __init__(self, app, authenticator: TankJWTAuthenticator) -> None:
         super().__init__(app)
-        self._resolver = resolver
+        self._authenticator = authenticator
 
     async def dispatch(self, request: Request, call_next):
-        forwarded_for = request.headers.get("x-forwarded-for")
-        peer_ip = request.client.host if request.client else None
-        pod_ip = extract_source_pod_ip(forwarded_for, peer_ip)
         if request.url.path == "/healthz":
             caller = None
-        elif not pod_ip:
-            return Response("caller resolution failed: missing source pod IP", status_code=503)
         else:
             try:
-                caller = await self._resolver.resolve(pod_ip)
-            except CallerResolutionError as exc:
-                return Response(f"caller resolution failed: {exc}", status_code=503)
+                caller = self._authenticator.authenticate(request.headers.get("authorization"))
+            except CallerAuthError as exc:
+                return Response(f"caller authentication failed: {exc}", status_code=401)
         token = CALLER.set(caller)
         try:
             return await call_next(request)
@@ -78,13 +59,10 @@ class CallerResolutionMiddleware(BaseHTTPMiddleware):
 
 
 def build_app() -> Starlette:
-    # The streamable_http transport ships a DNS-rebinding-protection middleware
-    # that 421s any Host header not in `allowed_hosts`. Default whitelist only
-    # covers localhost, so in-cluster requests to mcp-github.mcp-github.svc get
-    # rejected. Disable here — kube-rbac-proxy in front of this process already
-    # gates auth via K8s SA tokens, so DNS rebinding can't reach an unauthorized
-    # caller anyway. Set streamable_http_path to "/" so requests POSTed to "/"
-    # don't hit Starlette's trailing-slash redirect (was 307 → 421 loop).
+    # The streamable_http transport ships DNS-rebinding protection that 421s
+    # Host values outside its local allowlist. In-cluster requests legitimately
+    # target mcp-github.mcp-github.svc, while application-layer Tank JWT auth is
+    # the boundary for every non-health request.
     mcp = FastMCP(
         "github-mcp",
         stateless_http=True,
@@ -105,8 +83,7 @@ def build_app() -> Starlette:
         tank_operator_private_key=_req("TANK_OPERATOR_APP_PRIVATE_KEY"),
     )
     log.info(
-        "per-caller routing active: tank-operator-app keys present, "
-        "non-host callers mint via their installation_id"
+        "Tank GitHub MCP auth active: requests require aud=mcp-github-tank attestations"
     )
     register_tools(mcp, GitHubClient(pool))
 
@@ -120,13 +97,11 @@ def build_app() -> Starlette:
         # so the client can reconnect cleanly after a pod restart.
         return Response(status_code=200)
 
-    resolver = CallerResolver()
+    authenticator = TankJWTAuthenticator()
 
     # Starlette's Mount doesn't forward lifespan events to the inner app, so
-    # FastMCP's session_manager.run() — which sets up the anyio task group
-    # the streamable-http handler depends on — never fires when we mount it.
-    # Wire the run() context into the outer app's lifespan ourselves; without
-    # this every request 500s with "Task group is not initialized".
+    # FastMCP's session_manager.run() never fires when we mount it. Wire the
+    # run() context into the outer app's lifespan ourselves.
     @asynccontextmanager
     async def lifespan(_app: Starlette):
         async with mcp.session_manager.run():
@@ -138,11 +113,8 @@ def build_app() -> Starlette:
             Route("/", delete_session, methods=["DELETE"]),
             Mount("/", app=mcp.streamable_http_app()),
         ],
-        # Middleware applies to every route, including /healthz — that's
-        # fine; resolver short-circuits on missing pod IP and probes have
-        # no X-Forwarded-For from the kubelet localhost-execed probe.
         middleware=[
-            Middleware(CallerResolutionMiddleware, resolver=resolver),
+            Middleware(CallerAuthMiddleware, authenticator=authenticator),
         ],
         lifespan=lifespan,
     )
@@ -153,7 +125,7 @@ def main() -> None:
     import uvicorn
 
     port = int(os.environ.get("PORT", "8080"))
-    uvicorn.run(build_app(), host="127.0.0.1", port=port)
+    uvicorn.run(build_app(), host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
