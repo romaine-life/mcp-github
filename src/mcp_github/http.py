@@ -5,16 +5,14 @@ a K8s SA token, the proxy validates it via TokenReview + SubjectAccessReview,
 and only authorized requests reach this server. Binding loopback so direct
 pod-IP:8080 access bypasses nothing — only the proxy can talk to us.
 
-Outgoing GitHub auth used to be one process-wide installation token from
-the host's romaine-life-app App. #57 stage 3 changed that: a Starlette
-middleware below recovers the source session pod's IP from
+Outgoing GitHub auth is caller-scoped. A Starlette middleware below
+recovers the source session pod's IP from
 ``X-Forwarded-For``, asks the orchestrator's
 ``/api/internal/resolve-caller`` for the caller's email +
 installation_id, and stashes it in a ContextVar. The MinterPool reads
-that on each tool call to pick the right App installation. The path is
-fail-open — anything that goes wrong (no header, orchestrator down,
-unknown pod) leaves the contextvar unset and the pool falls back to the
-host minter, preserving pre-stage-3 behavior.
+that on each tool call to pick the right App installation. Resolution
+must succeed for proxied MCP requests; caller identity is part of the
+security boundary.
 """
 
 import logging
@@ -31,7 +29,7 @@ from starlette.responses import Response
 from starlette.routing import Mount, Route
 
 from .auth import GitHubAppTokenMinter
-from .caller import CALLER, CallerResolver, extract_source_pod_ip
+from .caller import CALLER, CallerResolutionError, CallerResolver, extract_source_pod_ip
 from .github_client import GitHubClient
 from .minter_pool import MinterPool
 from .tools import register_tools
@@ -44,11 +42,6 @@ def _req(name: str) -> str:
     if not v:
         raise RuntimeError(f"missing env var: {name}")
     return v
-
-
-def _opt(name: str) -> str | None:
-    v = os.environ.get(name)
-    return v if v else None
 
 
 class CallerResolutionMiddleware(BaseHTTPMiddleware):
@@ -68,7 +61,15 @@ class CallerResolutionMiddleware(BaseHTTPMiddleware):
         forwarded_for = request.headers.get("x-forwarded-for")
         peer_ip = request.client.host if request.client else None
         pod_ip = extract_source_pod_ip(forwarded_for, peer_ip)
-        caller = await self._resolver.resolve(pod_ip) if pod_ip else None
+        if request.url.path == "/healthz":
+            caller = None
+        elif not pod_ip:
+            return Response("caller resolution failed: missing source pod IP", status_code=503)
+        else:
+            try:
+                caller = await self._resolver.resolve(pod_ip)
+            except CallerResolutionError as exc:
+                return Response(f"caller resolution failed: {exc}", status_code=503)
         token = CALLER.set(caller)
         try:
             return await call_next(request)
@@ -100,19 +101,13 @@ def build_app() -> Starlette:
     )
     pool = MinterPool(
         host_minter=host_minter,
-        tank_operator_app_id=_opt("TANK_OPERATOR_APP_ID"),
-        tank_operator_private_key=_opt("TANK_OPERATOR_APP_PRIVATE_KEY"),
+        tank_operator_app_id=_req("TANK_OPERATOR_APP_ID"),
+        tank_operator_private_key=_req("TANK_OPERATOR_APP_PRIVATE_KEY"),
     )
-    if pool.tank_operator_app_enabled:
-        log.info(
-            "per-caller routing active: tank-operator-app keys present, "
-            "non-host callers will mint via their installation_id"
-        )
-    else:
-        log.warning(
-            "per-caller routing degraded: tank-operator-app keys absent, "
-            "all callers fall back to the host romaine-life-app installation"
-        )
+    log.info(
+        "per-caller routing active: tank-operator-app keys present, "
+        "non-host callers mint via their installation_id"
+    )
     register_tools(mcp, GitHubClient(pool))
 
     async def healthz(_: Request) -> Response:

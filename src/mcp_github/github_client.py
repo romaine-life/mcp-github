@@ -50,11 +50,8 @@ class GitHubClient:
     """Wraps GitHub API calls with the right per-caller App minter.
 
     Resolves the minter on every request via the contextvar set by the
-    HTTP middleware (see ``caller.py``). When the contextvar is unset
-    — stdio mode, an unrecognised caller, or a failed orchestrator
-    lookup — the pool returns the host minter, which preserves
-    pre-stage-3 behavior for every code path that doesn't have a
-    routable caller.
+    HTTP middleware (see ``caller.py``). Proxied MCP requests must have a
+    resolved caller before tools run.
 
     Cross-installation fallback. Tools that target a specific repo pass
     ``repo=(owner, name)`` so the client can retry on behalf of a

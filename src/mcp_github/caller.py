@@ -23,14 +23,9 @@ Mechanics:
    ``@mcp.tool()`` body can call ``current_caller()`` without
    threading a request object through every tool signature.
 
-Failure mode: anything that goes wrong in steps 2/3 (no pod IP, the
-orchestrator is down, the pod is brand-new and not yet a session row)
-leaves the ``ContextVar`` at its ``None`` default. The minter pool
-falls back to the host's existing romaine-life-app installation in
-that case — i.e. *today's* behavior. So this stage 3 wiring is fail-
-open: the friend's session never breaks even if the orchestrator
-endpoint is unreachable; it just falls back to the pre-stage-3
-attribution.
+Failure mode: anything that goes wrong in steps 2/3 fails the request.
+Caller identity is part of the security boundary; callers should not
+silently fall back to another installation just because resolution broke.
 """
 
 from __future__ import annotations
@@ -52,20 +47,10 @@ ORCHESTRATOR_URL = os.environ.get(
     "ORCHESTRATOR_INTERNAL_URL",
     "http://tank-operator.tank-operator.svc:80",
 )
-# Audience-scoped token path. When TANK_OPERATOR_SA_TOKEN_PATH is set
-# (by the chart's projected serviceAccountToken volume), the resolver
-# sends a token minted with audience "tank-operator" so the orchestrator
-# can reject tokens not intended for it (defense-in-depth on top of the
-# SA-name allowlist). Falls back to the default K8s SA token path for
-# backward compatibility in environments that haven't deployed the chart
-# update yet — the allowlist still gates access in that case.
-SA_TOKEN_PATH = os.environ.get(
-    "TANK_OPERATOR_SA_TOKEN_PATH",
-    os.environ.get(
-        "SA_TOKEN_PATH",
-        "/var/run/secrets/kubernetes.io/serviceaccount/token",
-    ),
-)
+# Audience-scoped token path. The chart projects a token minted with
+# audience "tank-operator" so the orchestrator can reject tokens not
+# intended for it.
+SA_TOKEN_PATH = os.environ.get("TANK_OPERATOR_SA_TOKEN_PATH", "")
 RESOLVE_TIMEOUT_SECONDS = float(os.environ.get("CALLER_RESOLVE_TIMEOUT", "3.0"))
 # Caller-resolution cache TTL. The orchestrator lookup is cheap, but caching
 # keeps a session pod's tool burst from amplifying into N internal-API
@@ -93,10 +78,12 @@ class CallerIdentity:
                 else None
             ),
             is_host=is_host,
-            # Older orchestrators do not send is_super_admin. Treat host as
-            # super-admin for compatibility with the pre-explicit-role model.
-            is_super_admin=bool(body.get("is_super_admin", is_host)),
+            is_super_admin=bool(body.get("is_super_admin", False)),
         )
+
+
+class CallerResolutionError(RuntimeError):
+    """Caller identity could not be established for the request."""
 
 
 CALLER: ContextVar[CallerIdentity | None] = ContextVar("mcp_github_caller", default=None)
@@ -105,8 +92,8 @@ CALLER: ContextVar[CallerIdentity | None] = ContextVar("mcp_github_caller", defa
 def current_caller() -> CallerIdentity | None:
     """Return the caller identity for the in-flight MCP request, or None.
 
-    Tools should treat ``None`` the same as "fall back to the default
-    minter" — `MinterPool.for_caller` does that internally.
+    ``None`` is only expected outside proxied MCP requests, such as
+    process-local tests that set the context directly.
     """
     return CALLER.get()
 
@@ -139,15 +126,12 @@ class CallerResolver:
         try:
             return self._sa_token_path.read_text().strip()
         except OSError:
-            log.warning(
-                "could not read SA token at %s; caller resolution disabled",
-                self._sa_token_path,
-            )
+            log.warning("could not read SA token at %s", self._sa_token_path)
             return None
 
-    async def resolve(self, pod_ip: str) -> CallerIdentity | None:
+    async def resolve(self, pod_ip: str) -> CallerIdentity:
         if not pod_ip:
-            return None
+            raise CallerResolutionError("missing source pod IP")
         with self._lock:
             cached = self._cache.get(pod_ip)
         if cached is not None:
@@ -157,7 +141,7 @@ class CallerResolver:
 
         token = self._read_sa_token()
         if not token:
-            return None
+            raise CallerResolutionError(f"could not read SA token at {self._sa_token_path}")
 
         try:
             async with httpx.AsyncClient(timeout=RESOLVE_TIMEOUT_SECONDS) as client:
@@ -168,16 +152,16 @@ class CallerResolver:
                 )
         except httpx.HTTPError as exc:
             log.warning("orchestrator resolve-caller failed for %s: %s", pod_ip, exc)
-            return None
+            raise CallerResolutionError("orchestrator resolve-caller request failed") from exc
 
         if resp.status_code == 404:
-            value: CallerIdentity | None = None
+            raise CallerResolutionError(f"no session pod with IP {pod_ip}")
         elif resp.status_code == 200:
             try:
                 value = CallerIdentity.from_dict(resp.json())
-            except Exception:  # noqa: BLE001 — bad payload is "no caller", same outcome
+            except Exception:  # noqa: BLE001 - payload details are logged below
                 log.warning("malformed resolve-caller body: %s", resp.text[:200])
-                value = None
+                raise CallerResolutionError("malformed resolve-caller body") from None
         else:
             log.warning(
                 "orchestrator resolve-caller %s for %s: %s",
@@ -185,7 +169,9 @@ class CallerResolver:
                 pod_ip,
                 resp.text[:200],
             )
-            return None
+            raise CallerResolutionError(
+                f"orchestrator resolve-caller returned {resp.status_code}"
+            )
 
         with self._lock:
             self._cache[pod_ip] = (value, time.time() + self._cache_ttl)
