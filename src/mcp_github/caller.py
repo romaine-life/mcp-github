@@ -33,11 +33,11 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -57,6 +57,10 @@ ORCHESTRATOR_URLS = tuple(
 # audience "tank-operator" so the orchestrator can reject tokens not
 # intended for it.
 SA_TOKEN_PATH = os.environ.get("TANK_OPERATOR_SA_TOKEN_PATH", "")
+FALLBACK_SA_TOKEN_PATH = os.environ.get(
+    "FALLBACK_SA_TOKEN_PATH",
+    "/var/run/secrets/kubernetes.io/serviceaccount/token",
+)
 RESOLVE_TIMEOUT_SECONDS = float(os.environ.get("CALLER_RESOLVE_TIMEOUT", "3.0"))
 # Caller-resolution cache TTL. The orchestrator lookup is cheap, but caching
 # keeps a session pod's tool burst from amplifying into N internal-API
@@ -121,6 +125,7 @@ class CallerResolver:
         orchestrator_url: str = ORCHESTRATOR_URL,
         orchestrator_urls: Sequence[str] | None = None,
         sa_token_path: str = SA_TOKEN_PATH,
+        fallback_sa_token_path: str = FALLBACK_SA_TOKEN_PATH,
         cache_ttl_seconds: float = CACHE_TTL_SECONDS,
     ) -> None:
         if orchestrator_urls is not None:
@@ -133,16 +138,27 @@ class CallerResolver:
             urls = (orchestrator_url,)
         self._urls = tuple(url.rstrip("/") for url in urls if url.rstrip("/"))
         self._sa_token_path = Path(sa_token_path)
+        self._fallback_sa_token_path = Path(fallback_sa_token_path)
         self._cache_ttl = cache_ttl_seconds
         self._cache: dict[str, tuple[CallerIdentity | None, float]] = {}
         self._lock = Lock()
 
-    def _read_sa_token(self) -> str | None:
+    def _read_token(self, path: Path) -> str | None:
         try:
-            return self._sa_token_path.read_text().strip()
+            return path.read_text().strip()
         except OSError:
-            log.warning("could not read SA token at %s", self._sa_token_path)
+            log.warning("could not read SA token at %s", path)
             return None
+
+    def _token_candidates(self) -> list[tuple[str, str]]:
+        tokens: list[tuple[str, str]] = []
+        primary = self._read_token(self._sa_token_path)
+        if primary:
+            tokens.append((str(self._sa_token_path), primary))
+        fallback = self._read_token(self._fallback_sa_token_path)
+        if fallback and fallback != primary:
+            tokens.append((str(self._fallback_sa_token_path), fallback))
+        return tokens
 
     async def resolve(self, pod_ip: str) -> CallerIdentity:
         if not pod_ip:
@@ -154,44 +170,62 @@ class CallerResolver:
             if expires_at > time.time():
                 return value
 
-        token = self._read_sa_token()
-        if not token:
+        token_candidates = self._token_candidates()
+        if not token_candidates:
             raise CallerResolutionError(f"could not read SA token at {self._sa_token_path}")
 
         saw_not_found = False
         for url in self._urls:
-            try:
-                async with httpx.AsyncClient(timeout=RESOLVE_TIMEOUT_SECONDS) as client:
-                    resp = await client.get(
-                        f"{url}/api/internal/resolve-caller",
-                        params={"pod_ip": pod_ip},
-                        headers={"Authorization": f"Bearer {token}"},
+            for token_path, token in token_candidates:
+                try:
+                    async with httpx.AsyncClient(timeout=RESOLVE_TIMEOUT_SECONDS) as client:
+                        resp = await client.get(
+                            f"{url}/api/internal/resolve-caller",
+                            params={"pod_ip": pod_ip},
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+                except httpx.HTTPError as exc:
+                    log.warning(
+                        "orchestrator resolve-caller failed for %s via %s using %s: %s",
+                        pod_ip,
+                        url,
+                        token_path,
+                        exc,
                     )
-            except httpx.HTTPError as exc:
-                log.warning("orchestrator resolve-caller failed for %s via %s: %s", pod_ip, url, exc)
-                continue
+                    continue
 
-            if resp.status_code == 404:
-                saw_not_found = True
+                if resp.status_code == 401 and token_path != token_candidates[-1][0]:
+                    continue
+                if resp.status_code == 404:
+                    saw_not_found = True
+                    break
+                if resp.status_code == 200:
+                    try:
+                        value = CallerIdentity.from_dict(resp.json())
+                    except Exception:  # noqa: BLE001 - payload details are logged below
+                        log.warning(
+                            "malformed resolve-caller body from %s: %s",
+                            url,
+                            resp.text[:200],
+                        )
+                        raise CallerResolutionError("malformed resolve-caller body") from None
+                    break
+
+                log.warning(
+                    "orchestrator resolve-caller %s for %s via %s using %s: %s",
+                    resp.status_code,
+                    pod_ip,
+                    url,
+                    token_path,
+                    resp.text[:200],
+                )
+                raise CallerResolutionError(
+                    f"orchestrator resolve-caller returned {resp.status_code}"
+                )
+            else:
                 continue
             if resp.status_code == 200:
-                try:
-                    value = CallerIdentity.from_dict(resp.json())
-                except Exception:  # noqa: BLE001 - payload details are logged below
-                    log.warning("malformed resolve-caller body from %s: %s", url, resp.text[:200])
-                    raise CallerResolutionError("malformed resolve-caller body") from None
                 break
-
-            log.warning(
-                "orchestrator resolve-caller %s for %s via %s: %s",
-                resp.status_code,
-                pod_ip,
-                url,
-                resp.text[:200],
-            )
-            raise CallerResolutionError(
-                f"orchestrator resolve-caller returned {resp.status_code}"
-            )
         else:
             if saw_not_found:
                 raise CallerResolutionError(f"no session pod with IP {pod_ip}")

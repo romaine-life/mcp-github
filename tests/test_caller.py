@@ -223,6 +223,36 @@ def test_resolver_falls_back_to_next_orchestrator_on_404(sa_token_file: Path) ->
     ]
 
 
+def test_resolver_retries_with_fallback_token_on_401(
+    sa_token_file: Path, tmp_path: Path
+) -> None:
+    fallback = tmp_path / "default-token"
+    fallback.write_text("fallback-token\n")
+    fake = _FakeAsyncClient(
+        [401, 200],
+        [
+            {"detail": "ServiceAccount token not authenticated"},
+            {"email": "slot@example.test", "installation_id": 456, "is_host": False},
+        ],
+    )
+    resolver = CallerResolver(
+        orchestrator_url="http://slot-3",
+        sa_token_path=str(sa_token_file),
+        fallback_sa_token_path=str(fallback),
+    )
+
+    with patch("mcp_github.caller.httpx.AsyncClient", return_value=fake):
+        import asyncio
+
+        caller = asyncio.run(resolver.resolve("10.0.0.99"))
+
+    assert caller.email == "slot@example.test"
+    assert [call["headers"]["Authorization"] for call in fake.calls] == [
+        "Bearer fake-sa-token",
+        "Bearer fallback-token",
+    ]
+
+
 def test_resolver_caches_responses(sa_token_file: Path) -> None:
     fake = _FakeAsyncClient(
         200,
@@ -248,6 +278,7 @@ def test_resolver_raises_when_sa_token_unreadable(tmp_path: Path) -> None:
     resolver = CallerResolver(
         orchestrator_url="http://orchestrator",
         sa_token_path=str(tmp_path / "does-not-exist"),
+        fallback_sa_token_path=str(tmp_path / "fallback-does-not-exist"),
     )
 
     import asyncio
