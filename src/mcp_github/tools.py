@@ -886,17 +886,15 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         branch: str | None = None,
         status: str | None = None,
         limit: int | None = 10,
-        per_page: int | None = None,
     ) -> list[dict[str, Any]]:
         """List recent GitHub Actions workflow runs for a workflow file or workflow ID.
 
         Use to monitor CI, builds, deployments, and rollout jobs. `workflow` is
         a file name like `build.yml` or a numeric workflow ID; `status` can be
         queued, in_progress, completed, success, failure, or similar. `limit`
-        caps returned runs. `per_page` is accepted as a backward-compatible
-        alias for `limit`.
+        caps returned runs.
         """
-        cap = _clamp_limit(per_page if per_page is not None else limit, default=10)
+        cap = _clamp_limit(limit, default=10)
         params: dict[str, Any] = {"per_page": min(cap, 100)}
         if branch:
             params["branch"] = branch

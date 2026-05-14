@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mcp_github.auth import GitHubAppTokenMinter  # noqa: E402
@@ -33,9 +35,10 @@ def _enabled_pool() -> tuple[MinterPool, GitHubAppTokenMinter]:
     return pool, host
 
 
-def test_unknown_caller_uses_host() -> None:
-    pool, host = _enabled_pool()
-    assert pool.for_caller(None) is host
+def test_unknown_caller_is_rejected() -> None:
+    pool, _ = _enabled_pool()
+    with pytest.raises(RuntimeError, match="caller identity is required"):
+        pool.for_caller(None)
 
 
 def test_host_caller_uses_host_minter() -> None:
@@ -44,16 +47,13 @@ def test_host_caller_uses_host_minter() -> None:
     assert pool.for_caller(caller) is host
 
 
-def test_non_host_without_installation_falls_back_to_host() -> None:
-    """Pre-onboarding: user has logged in but not installed the App yet.
-    Don't 401 — fall back to the host's installation, which preserves
-    today's behavior so a new user isn't blocked from cluster-side
-    lookups before the install flow finishes."""
-    pool, host = _enabled_pool()
+def test_non_host_without_installation_is_rejected() -> None:
+    pool, _ = _enabled_pool()
     caller = CallerIdentity(
         email="newcomer@example.test", installation_id=None, is_host=False
     )
-    assert pool.for_caller(caller) is host
+    with pytest.raises(RuntimeError, match="no GitHub installation_id"):
+        pool.for_caller(caller)
 
 
 def test_non_host_with_installation_uses_user_minter() -> None:
@@ -92,39 +92,24 @@ def test_distinct_users_get_distinct_minters() -> None:
     assert bob._installation_id == "99"
 
 
-def test_disabled_tank_op_app_falls_back_to_host_for_everyone() -> None:
-    """Chart upgrade window or dev cluster: tank-operator-app keys not
-    yet synced. The pool degrades to host-minter-for-everyone instead
-    of crashing or 401ing the tools — pre-stage-3 behavior, logged at
-    boot via ``tank_operator_app_enabled``."""
+def test_missing_tank_op_app_keys_fail_pool_construction() -> None:
     host = _host_minter()
-    pool = MinterPool(
-        host_minter=host,
-        tank_operator_app_id=None,
-        tank_operator_private_key=None,
-    )
-    assert pool.tank_operator_app_enabled is False
-    caller = CallerIdentity(
-        email="alice@example.test", installation_id=42, is_host=False
-    )
-    assert pool.for_caller(caller) is host
+    with pytest.raises(RuntimeError, match="credentials are required"):
+        MinterPool(
+            host_minter=host,
+            tank_operator_app_id=None,
+            tank_operator_private_key=None,
+        )
 
 
-def test_partial_tank_op_keys_treated_as_disabled() -> None:
-    """One-of-two keys is broken config. Don't half-enable the path
-    (we'd build a bad minter and 401 every per-user call); treat it
-    the same as fully disabled."""
+def test_partial_tank_op_keys_fail_pool_construction() -> None:
     host = _host_minter()
-    pool = MinterPool(
-        host_minter=host,
-        tank_operator_app_id="just-id",
-        tank_operator_private_key=None,
-    )
-    assert pool.tank_operator_app_enabled is False
-    caller = CallerIdentity(
-        email="alice@example.test", installation_id=42, is_host=False
-    )
-    assert pool.for_caller(caller) is host
+    with pytest.raises(RuntimeError, match="credentials are required"):
+        MinterPool(
+            host_minter=host,
+            tank_operator_app_id="just-id",
+            tank_operator_private_key=None,
+        )
 
 
 # ---------------------------------------------------------------------------

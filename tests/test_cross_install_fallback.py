@@ -8,7 +8,7 @@ Tests cover:
 - both user + host fail: original error propagates
 - host retry fails (not installed): original error propagates
 - mint_clone_token fallback for host-owned repos via non-host caller
-- host caller / anonymous caller: no fallback machinery involved
+- host caller: no fallback machinery involved
 """
 
 from __future__ import annotations
@@ -33,12 +33,12 @@ from mcp_github.minter_pool import MinterPool  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-def _pool(*, app_enabled: bool = True) -> tuple[MinterPool, GitHubAppTokenMinter]:
+def _pool() -> tuple[MinterPool, GitHubAppTokenMinter]:
     host = GitHubAppTokenMinter("host-app", "host-install", "host-key")
     pool = MinterPool(
         host_minter=host,
-        tank_operator_app_id="user-app" if app_enabled else None,
-        tank_operator_private_key="user-key" if app_enabled else None,
+        tank_operator_app_id="user-app",
+        tank_operator_private_key="user-key",
     )
     return pool, host
 
@@ -354,7 +354,7 @@ def test_both_fail_raises_original_404() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Host callers and anonymous callers bypass fallback
+# Host callers bypass fallback
 # ---------------------------------------------------------------------------
 
 

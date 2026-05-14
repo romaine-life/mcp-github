@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mcp_github.caller import (  # noqa: E402
     CallerIdentity,
+    CallerResolutionError,
     CallerResolver,
     extract_source_pod_ip,
 )
@@ -51,7 +52,7 @@ def test_caller_identity_from_dict_host_flag() -> None:
         {"email": "host@example.test", "installation_id": 1, "is_host": True}
     )
     assert caller.is_host is True
-    assert caller.is_super_admin is True
+    assert caller.is_super_admin is False
 
 
 def test_caller_identity_from_dict_super_admin_flag() -> None:
@@ -175,7 +176,7 @@ def test_resolver_returns_identity_on_200(sa_token_file: Path) -> None:
     assert fake.calls[0]["headers"]["Authorization"] == "Bearer fake-sa-token"
 
 
-def test_resolver_returns_none_on_404(sa_token_file: Path) -> None:
+def test_resolver_raises_on_404(sa_token_file: Path) -> None:
     fake = _FakeAsyncClient(404, {"detail": "no session pod with IP"})
     resolver = CallerResolver(
         orchestrator_url="http://orchestrator", sa_token_path=str(sa_token_file)
@@ -184,9 +185,8 @@ def test_resolver_returns_none_on_404(sa_token_file: Path) -> None:
     with patch("mcp_github.caller.httpx.AsyncClient", return_value=fake):
         import asyncio
 
-        caller = asyncio.run(resolver.resolve("10.0.0.99"))
-
-    assert caller is None
+        with pytest.raises(CallerResolutionError, match="no session pod"):
+            asyncio.run(resolver.resolve("10.0.0.99"))
 
 
 def test_resolver_caches_responses(sa_token_file: Path) -> None:
@@ -210,9 +210,7 @@ def test_resolver_caches_responses(sa_token_file: Path) -> None:
     assert len(fake.calls) == 1, "second resolve should have hit the cache, not refetched"
 
 
-def test_resolver_returns_none_when_sa_token_unreadable(tmp_path: Path) -> None:
-    """Token file missing (e.g. stdio-mode unit test, broken mount) → None,
-    same outcome as 'caller unknown'. Pool falls back to host minter."""
+def test_resolver_raises_when_sa_token_unreadable(tmp_path: Path) -> None:
     resolver = CallerResolver(
         orchestrator_url="http://orchestrator",
         sa_token_path=str(tmp_path / "does-not-exist"),
@@ -220,19 +218,16 @@ def test_resolver_returns_none_when_sa_token_unreadable(tmp_path: Path) -> None:
 
     import asyncio
 
-    caller = asyncio.run(resolver.resolve("10.0.0.1"))
-    assert caller is None
+    with pytest.raises(CallerResolutionError, match="could not read SA token"):
+        asyncio.run(resolver.resolve("10.0.0.1"))
 
 
-def test_resolver_returns_none_when_pod_ip_blank(sa_token_file: Path) -> None:
-    """No source IP → no remote call, no cache entry. Avoids hammering
-    the orchestrator with bogus lookups for non-IP-bearing requests
-    (kubelet probes, etc.)."""
+def test_resolver_raises_when_pod_ip_blank(sa_token_file: Path) -> None:
     resolver = CallerResolver(
         orchestrator_url="http://orchestrator", sa_token_path=str(sa_token_file)
     )
 
     import asyncio
 
-    caller = asyncio.run(resolver.resolve(""))
-    assert caller is None
+    with pytest.raises(CallerResolutionError, match="missing source pod IP"):
+        asyncio.run(resolver.resolve(""))
