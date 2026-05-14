@@ -42,3 +42,15 @@ proxyResources:
 # Overridden in per-slot value overlays where the orchestrator runs in
 # a different namespace.
 orchestratorUrl: http://tank-operator.tank-operator.svc:80
+orchestratorUrls:
+  - http://tank-operator.tank-operator.svc:80
+  - http://tank-operator.tank-operator-slot-1.svc:80
+  - http://tank-operator.tank-operator-slot-2.svc:80
+  - http://tank-operator.tank-operator-slot-3.svc:80
+  - http://tank-operator.tank-operator-slot-4.svc:80
+  - http://tank-operator.tank-operator-slot-5.svc:80
+  - http://tank-operator.tank-operator-slot-6.svc:80
+  - http://tank-operator.tank-operator-slot-7.svc:80
+  - http://tank-operator.tank-operator-slot-8.svc:80
+  - http://tank-operator.tank-operator-slot-9.svc:80
+  - http://tank-operator.tank-operator-slot-10.svc:80

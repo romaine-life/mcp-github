@@ -37,6 +37,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -46,6 +47,11 @@ log = logging.getLogger(__name__)
 ORCHESTRATOR_URL = os.environ.get(
     "ORCHESTRATOR_INTERNAL_URL",
     "http://tank-operator.tank-operator.svc:80",
+)
+ORCHESTRATOR_URLS = tuple(
+    url.strip().rstrip("/")
+    for url in os.environ.get("ORCHESTRATOR_INTERNAL_URLS", ORCHESTRATOR_URL).split(",")
+    if url.strip()
 )
 # Audience-scoped token path. The chart projects a token minted with
 # audience "tank-operator" so the orchestrator can reject tokens not
@@ -113,10 +119,19 @@ class CallerResolver:
     def __init__(
         self,
         orchestrator_url: str = ORCHESTRATOR_URL,
+        orchestrator_urls: Sequence[str] | None = None,
         sa_token_path: str = SA_TOKEN_PATH,
         cache_ttl_seconds: float = CACHE_TTL_SECONDS,
     ) -> None:
-        self._url = orchestrator_url.rstrip("/")
+        if orchestrator_urls is not None:
+            urls = orchestrator_urls
+        elif orchestrator_url != ORCHESTRATOR_URL:
+            urls = (orchestrator_url,)
+        else:
+            urls = ORCHESTRATOR_URLS
+        if not urls:
+            urls = (orchestrator_url,)
+        self._urls = tuple(url.rstrip("/") for url in urls if url.rstrip("/"))
         self._sa_token_path = Path(sa_token_path)
         self._cache_ttl = cache_ttl_seconds
         self._cache: dict[str, tuple[CallerIdentity | None, float]] = {}
@@ -143,35 +158,44 @@ class CallerResolver:
         if not token:
             raise CallerResolutionError(f"could not read SA token at {self._sa_token_path}")
 
-        try:
-            async with httpx.AsyncClient(timeout=RESOLVE_TIMEOUT_SECONDS) as client:
-                resp = await client.get(
-                    f"{self._url}/api/internal/resolve-caller",
-                    params={"pod_ip": pod_ip},
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-        except httpx.HTTPError as exc:
-            log.warning("orchestrator resolve-caller failed for %s: %s", pod_ip, exc)
-            raise CallerResolutionError("orchestrator resolve-caller request failed") from exc
-
-        if resp.status_code == 404:
-            raise CallerResolutionError(f"no session pod with IP {pod_ip}")
-        elif resp.status_code == 200:
+        saw_not_found = False
+        for url in self._urls:
             try:
-                value = CallerIdentity.from_dict(resp.json())
-            except Exception:  # noqa: BLE001 - payload details are logged below
-                log.warning("malformed resolve-caller body: %s", resp.text[:200])
-                raise CallerResolutionError("malformed resolve-caller body") from None
-        else:
+                async with httpx.AsyncClient(timeout=RESOLVE_TIMEOUT_SECONDS) as client:
+                    resp = await client.get(
+                        f"{url}/api/internal/resolve-caller",
+                        params={"pod_ip": pod_ip},
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+            except httpx.HTTPError as exc:
+                log.warning("orchestrator resolve-caller failed for %s via %s: %s", pod_ip, url, exc)
+                continue
+
+            if resp.status_code == 404:
+                saw_not_found = True
+                continue
+            if resp.status_code == 200:
+                try:
+                    value = CallerIdentity.from_dict(resp.json())
+                except Exception:  # noqa: BLE001 - payload details are logged below
+                    log.warning("malformed resolve-caller body from %s: %s", url, resp.text[:200])
+                    raise CallerResolutionError("malformed resolve-caller body") from None
+                break
+
             log.warning(
-                "orchestrator resolve-caller %s for %s: %s",
+                "orchestrator resolve-caller %s for %s via %s: %s",
                 resp.status_code,
                 pod_ip,
+                url,
                 resp.text[:200],
             )
             raise CallerResolutionError(
                 f"orchestrator resolve-caller returned {resp.status_code}"
             )
+        else:
+            if saw_not_found:
+                raise CallerResolutionError(f"no session pod with IP {pod_ip}")
+            raise CallerResolutionError("orchestrator resolve-caller request failed")
 
         with self._lock:
             self._cache[pod_ip] = (value, time.time() + self._cache_ttl)

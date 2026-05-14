@@ -41,6 +41,8 @@ spec:
             # orchestrator runs in a non-default namespace.
             - name: ORCHESTRATOR_INTERNAL_URL
               value: "{{ .Values.orchestratorUrl }}"
+            - name: ORCHESTRATOR_INTERNAL_URLS
+              value: "{{ join "," .Values.orchestratorUrls }}"
             # Audience-scoped SA token for calling the orchestrator's
             # /api/internal/* endpoints. A dedicated projected token
             # with audience "tank-operator" is mounted separately from
