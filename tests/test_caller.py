@@ -117,9 +117,17 @@ class _FakeAsyncClient:
     forwarded as Bearer auth.
     """
 
-    def __init__(self, response_status: int, response_body: dict | None = None) -> None:
-        self._status = response_status
-        self._body = response_body or {}
+    def __init__(
+        self,
+        response_status: int | list[int],
+        response_body: dict | list[dict | None] | None = None,
+    ) -> None:
+        statuses = response_status if isinstance(response_status, list) else [response_status]
+        bodies = response_body if isinstance(response_body, list) else [response_body]
+        self._responses = [
+            (status, bodies[i] if i < len(bodies) else None)
+            for i, status in enumerate(statuses)
+        ]
         self.calls: list[dict] = []
 
     async def __aenter__(self):
@@ -130,7 +138,8 @@ class _FakeAsyncClient:
 
     async def get(self, url, params=None, headers=None):  # noqa: D401
         self.calls.append({"url": url, "params": params, "headers": headers})
-        return _FakeResponse(self._status, self._body)
+        status, body = self._responses[min(len(self.calls) - 1, len(self._responses) - 1)]
+        return _FakeResponse(status, body)
 
 
 class _FakeResponse:
@@ -187,6 +196,31 @@ def test_resolver_raises_on_404(sa_token_file: Path) -> None:
 
         with pytest.raises(CallerResolutionError, match="no session pod"):
             asyncio.run(resolver.resolve("10.0.0.99"))
+
+
+def test_resolver_falls_back_to_next_orchestrator_on_404(sa_token_file: Path) -> None:
+    fake = _FakeAsyncClient(
+        [404, 200],
+        [
+            {"detail": "no session pod with IP"},
+            {"email": "slot@example.test", "installation_id": 456, "is_host": False},
+        ],
+    )
+    resolver = CallerResolver(
+        orchestrator_urls=("http://main", "http://slot-3"),
+        sa_token_path=str(sa_token_file),
+    )
+
+    with patch("mcp_github.caller.httpx.AsyncClient", return_value=fake):
+        import asyncio
+
+        caller = asyncio.run(resolver.resolve("10.0.0.99"))
+
+    assert caller.email == "slot@example.test"
+    assert [call["url"] for call in fake.calls] == [
+        "http://main/api/internal/resolve-caller",
+        "http://slot-3/api/internal/resolve-caller",
+    ]
 
 
 def test_resolver_caches_responses(sa_token_file: Path) -> None:
