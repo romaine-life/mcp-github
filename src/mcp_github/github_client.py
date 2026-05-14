@@ -110,9 +110,61 @@ class GitHubClient:
                 if caller is not None:
                     self._pool.record_repo_inaccessible(caller, *repo)
                 return r2
-            # Both failed. Return the original response so _check raises
-            # the right status for callers like _is_404 in commit_to_branch.
+            # All fallbacks failed. Return the original response so _check
+            # raises the right status for callers like _is_404 in
+            # commit_to_branch.
+        elif (
+            repo is not None
+            and minter is self._pool.host
+            and caller is not None
+            and caller.is_super_admin
+            and _is_cross_install_failure(r)
+        ):
+            # Host/super-admin sessions can target repos that are installed
+            # only on a user-facing installation. Route the retry to the
+            # installation that actually contains the repo.
+            user_minter = self._user_minter_for_repo(*repo, exclude=minter)
+            if user_minter is not None:
+                r2 = make_request(self._headers(user_minter.installation_token()))
+                if r2.is_success:
+                    return r2
         return r
+
+    def _user_minter_for_repo(
+        self,
+        owner: str,
+        name: str,
+        *,
+        exclude: Any | None = None,
+    ):
+        """Find a user-facing App minter whose installation contains repo.
+
+        This is a super-admin fallback path only. Normal callers keep using
+        their own installation, with the existing user -> host fallback for
+        host-owned repos.
+        """
+        wanted = f"{owner}/{name}".lower()
+        for install in self._pool.list_user_app_installations():
+            installation_id = int(install["id"])
+            minter = self._pool.user_app_minter(installation_id)
+            if minter is exclude:
+                continue
+            page = 1
+            while True:
+                r = httpx.get(
+                    f"{GITHUB_API}/installation/repositories",
+                    headers=self._headers(minter.installation_token()),
+                    params={"per_page": 100, "page": page},
+                    timeout=15.0,
+                )
+                _check(r)
+                repos = r.json().get("repositories", [])
+                if any(repo["full_name"].lower() == wanted for repo in repos):
+                    return minter
+                if len(repos) < 100:
+                    break
+                page += 1
+        return None
 
     def get(
         self,

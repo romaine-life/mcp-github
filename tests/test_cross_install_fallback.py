@@ -382,6 +382,58 @@ def test_host_caller_does_not_trigger_fallback() -> None:
     assert len(call_count) == 1, "host caller: exactly one API call, no retry"
 
 
+def test_host_super_admin_retries_matching_user_installation_on_403() -> None:
+    pool, host = _pool()
+    caller = _caller(is_host=True, is_super_admin=True)
+    client = _client(pool)
+
+    _token_for(host, "host-tok")
+    user_minter = pool.user_app_minter(99)
+    _token_for(user_minter, "user-99-tok")
+
+    post_tokens: list[str] = []
+
+    def fake_post(url, *, headers, json, timeout):
+        tok = headers["Authorization"].split()[1]
+        post_tokens.append(tok)
+        req = httpx.Request("POST", url)
+        if tok == "host-tok":
+            return httpx.Response(
+                403,
+                text='{"message":"Resource not accessible by integration"}',
+                request=req,
+            )
+        return httpx.Response(201, json={"number": 7}, request=req)
+
+    def fake_get(url, *, headers, params, timeout):
+        req = httpx.Request("GET", url)
+        assert headers["Authorization"].split()[1] == "user-99-tok"
+        return httpx.Response(
+            200,
+            json={"repositories": [{"full_name": "diploidian/void_drifter"}]},
+            request=req,
+        )
+
+    pool.list_user_app_installations = MagicMock(return_value=[{"id": 99}])  # type: ignore[method-assign]
+
+    token = CALLER.set(caller)
+    try:
+        with (
+            patch("mcp_github.github_client.httpx.post", side_effect=fake_post),
+            patch("mcp_github.github_client.httpx.get", side_effect=fake_get),
+        ):
+            result = client.post(
+                "/repos/diploidian/void_drifter/pulls",
+                json={"title": "x"},
+                repo=("diploidian", "void_drifter"),
+            )
+    finally:
+        CALLER.reset(token)
+
+    assert result["number"] == 7
+    assert post_tokens == ["host-tok", "user-99-tok"]
+
+
 def test_no_repo_kwarg_raises_without_retry() -> None:
     pool, host = _pool()
     caller = _caller()
