@@ -2,12 +2,9 @@
 # mcp-github values
 # ============================================================================
 # GitHub App credentials come from KV via ExternalSecret. Incoming caller
-# identity comes from one of two issuers:
-#   - auth.romaine.life (preferred) → role=service JWT; installation_id
-#     resolved at request time via tank-operator's installation endpoint.
-#   - tank-operator (legacy) → Tank session attestation carrying
-#     installation_id + is_host directly. Retired once mcp-auth-proxy
-#     in session pods switches its bearer source for mcp-github.
+# identity comes from an auth.romaine.life-issued role=service JWT;
+# installation_id is resolved at request time via tank-operator's
+# /api/internal/github/installation endpoint.
 
 image:
   repository: romainecr.azurecr.io/mcp-github
@@ -17,13 +14,10 @@ image:
 port: 8080
 
 tankOperator:
-  jwksUrl: http://tank-operator.tank-operator.svc.cluster.local/api/internal/jwks
-  issuer: tank-operator
-  audience: mcp-github-tank
-  # Resolves caller's email → {installation_id, is_host, is_super_admin}
-  # for callers whose JWT issuer is auth.romaine.life. mcp-github forwards
-  # the caller's inbound JWT as Bearer, so the lookup is scoped to the
-  # caller's own actor_email (tightening the surface vs. an open lookup).
+  # Resolves caller's email → {installation_id, is_host, is_super_admin}.
+  # mcp-github forwards the caller's inbound auth.romaine.life JWT as
+  # Bearer, so the lookup is scoped to the caller's own actor_email
+  # (tightening the surface vs. an open lookup).
   installationUrl: http://tank-operator.tank-operator.svc.cluster.local/api/internal/github/installation
 
 authRomaineLife:

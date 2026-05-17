@@ -1,19 +1,12 @@
 """auth.romaine.life inbound JWT path for mcp-github.
 
-mcp-github is migrating from per-session Tank attestations (signed by
-tank-operator with audience=mcp-github-tank, carrying installation_id +
-is_host directly) to auth.romaine.life-issued role=service JWTs that
-carry only the caller's identity. The routing inputs the tool layer
-needs (installation_id, is_host, is_super_admin) are resolved at
-request time against tank-operator's
-GET /api/internal/github/installation endpoint.
-
-The migration is additive: ``caller.TankJWTAuthenticator`` stays in
-place; ``http.CallerAuthMiddleware`` dispatches on the JWT's
-unverified ``iss`` claim. When mcp-auth-proxy switches its bearer
-source from Tank attestations to auth.romaine.life service JWTs, this
-module's path is the only one that fires; Tank attestation
-authentication gets retired in a follow-up.
+mcp-github verifies auth.romaine.life-issued role=service JWTs on every
+inbound request. The routing inputs the tool layer needs
+(installation_id, is_host, is_super_admin) are resolved at request time
+against tank-operator's GET /api/internal/github/installation endpoint
+by forwarding the same JWT as the bearer (so tank-operator's
+``requireServicePrincipal`` scopes the lookup to the caller's
+actor_email).
 
 This module mirrors mcp-glimmung's auth_verifier.py shape but tightens
 the policy: only role=service tokens are accepted here (mcp-github is
@@ -65,9 +58,8 @@ class AuthRomaineLifeAuthenticator:
     """Verifies auth.romaine.life service JWTs and resolves the caller's
     installation_id by calling tank-operator's installation endpoint.
 
-    Produces a CallerIdentity (the same shape ``TankJWTAuthenticator``
-    produces) so the tool layer doesn't have to care which auth path
-    fired.
+    Produces a CallerIdentity for the tool layer to read via the
+    CALLER ContextVar.
     """
 
     def __init__(
@@ -214,34 +206,3 @@ def default_authenticator() -> AuthRomaineLifeAuthenticator:
     )
 
 
-def unverified_issuer(authorization: str | None) -> str | None:
-    """Peek at the JWT's iss claim WITHOUT verifying. Used by the
-    HTTP middleware to dispatch between the Tank-attestation
-    authenticator and the auth.romaine.life authenticator.
-
-    Returns None if the header is missing or the token doesn't parse.
-    The chosen authenticator does the real verification.
-    """
-    if not authorization:
-        return None
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token.strip():
-        return None
-    try:
-        claims = jwt.decode(token.strip(), options={"verify_signature": False})
-    except Exception:
-        return None
-    iss = claims.get("iss")
-    if isinstance(iss, str):
-        return iss
-    return None
-
-
-def is_auth_romaine_token(authorization: str | None) -> bool:
-    iss = unverified_issuer(authorization)
-    if iss is None:
-        return False
-    # auth.romaine.life issuers always start with https://auth. Tank
-    # attestation issuer is the literal "tank-operator". Prefix match
-    # so a trailing slash variant still routes correctly.
-    return iss.startswith("https://auth.")
