@@ -1,17 +1,10 @@
-"""HTTP entrypoint for Tank's GitHub MCP server.
+"""HTTP entrypoint for the GitHub MCP server.
 
-Incoming auth dispatches on the JWT's ``iss`` claim:
-
-  - ``iss=https://auth.romaine.life`` → ``AuthRomaineLifeAuthenticator``
-    (role=service token; installation_id resolved via tank-operator
-    /api/internal/github/installation).
-  - ``iss=tank-operator`` → ``TankJWTAuthenticator`` (the legacy Tank
-    session attestation path that carries installation_id directly).
-
-Both produce a ``CallerIdentity``; the tool layer doesn't see which
-path fired. The Tank-attestation path will be retired once
-mcp-auth-proxy in session pods switches to forwarding the
-auth.romaine.life service JWT.
+Inbound auth: every request must present an auth.romaine.life-issued
+role=service JWT in the Authorization header. The middleware verifies
+it against the IdP's JWKS, resolves the caller's GitHub App
+installation via tank-operator, and binds a ``CallerIdentity`` to the
+``CALLER`` ContextVar so the tool layer picks the right minter.
 """
 
 import logging
@@ -31,9 +24,8 @@ from .auth import GitHubAppTokenMinter
 from .auth_romaine import (
     AuthRomaineLifeAuthenticator,
     default_authenticator as default_auth_romaine_authenticator,
-    is_auth_romaine_token,
 )
-from .caller import CALLER, CallerAuthError, TankJWTAuthenticator
+from .caller import CALLER, CallerAuthError
 from .github_client import GitHubClient
 from .minter_pool import MinterPool
 from .tools import register_tools
@@ -51,34 +43,20 @@ def _req(name: str) -> str:
 class CallerAuthMiddleware(BaseHTTPMiddleware):
     """Authenticate the caller per request and bind it to the ContextVar.
 
-    Dispatches on the JWT's unverified ``iss`` claim:
-      - auth.romaine.life issuer → ``auth_romaine`` (preferred path,
-        resolves installation_id via tank-operator at request time)
-      - anything else → ``tank`` (the Tank session attestation
-        authenticator)
+    /healthz bypasses auth so liveness probes work without a token.
+    Every other path requires a valid auth.romaine.life service JWT.
     """
 
-    def __init__(
-        self,
-        app,
-        *,
-        tank: TankJWTAuthenticator,
-        auth_romaine: AuthRomaineLifeAuthenticator,
-    ) -> None:
+    def __init__(self, app, *, authenticator: AuthRomaineLifeAuthenticator) -> None:
         super().__init__(app)
-        self._tank = tank
-        self._auth_romaine = auth_romaine
+        self._authenticator = authenticator
 
     async def dispatch(self, request: Request, call_next):
         if request.url.path == "/healthz":
             caller = None
         else:
-            authorization = request.headers.get("authorization")
             try:
-                if is_auth_romaine_token(authorization):
-                    caller = self._auth_romaine.authenticate(authorization)
-                else:
-                    caller = self._tank.authenticate(authorization)
+                caller = self._authenticator.authenticate(request.headers.get("authorization"))
             except CallerAuthError as exc:
                 return Response(f"caller authentication failed: {exc}", status_code=401)
         token = CALLER.set(caller)
@@ -91,8 +69,8 @@ class CallerAuthMiddleware(BaseHTTPMiddleware):
 def build_app() -> Starlette:
     # The streamable_http transport ships DNS-rebinding protection that 421s
     # Host values outside its local allowlist. In-cluster requests legitimately
-    # target mcp-github.mcp-github.svc, while application-layer Tank JWT auth is
-    # the boundary for every non-health request.
+    # target mcp-github.mcp-github.svc, and the auth.romaine.life JWT gate is
+    # the application-layer boundary for every non-health request.
     mcp = FastMCP(
         "github-mcp",
         stateless_http=True,
@@ -112,9 +90,7 @@ def build_app() -> Starlette:
         tank_operator_app_id=_req("TANK_OPERATOR_APP_ID"),
         tank_operator_private_key=_req("TANK_OPERATOR_APP_PRIVATE_KEY"),
     )
-    log.info(
-        "GitHub MCP auth active: accepts auth.romaine.life service JWTs and Tank session attestations"
-    )
+    log.info("GitHub MCP auth active: requires auth.romaine.life role=service JWTs")
     register_tools(mcp, GitHubClient(pool))
 
     async def healthz(_: Request) -> Response:
@@ -127,8 +103,7 @@ def build_app() -> Starlette:
         # so the client can reconnect cleanly after a pod restart.
         return Response(status_code=200)
 
-    tank_authenticator = TankJWTAuthenticator()
-    auth_romaine_authenticator = default_auth_romaine_authenticator()
+    authenticator = default_auth_romaine_authenticator()
 
     # Starlette's Mount doesn't forward lifespan events to the inner app, so
     # FastMCP's session_manager.run() never fires when we mount it. Wire the
@@ -145,11 +120,7 @@ def build_app() -> Starlette:
             Mount("/", app=mcp.streamable_http_app()),
         ],
         middleware=[
-            Middleware(
-                CallerAuthMiddleware,
-                tank=tank_authenticator,
-                auth_romaine=auth_romaine_authenticator,
-            ),
+            Middleware(CallerAuthMiddleware, authenticator=authenticator),
         ],
         lifespan=lifespan,
     )

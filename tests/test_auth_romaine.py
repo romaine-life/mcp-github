@@ -16,8 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mcp_github.auth_romaine import (  # noqa: E402
     AuthRomaineLifeAuthenticator,
-    is_auth_romaine_token,
-    unverified_issuer,
 )
 from mcp_github.caller import CallerAuthError  # noqa: E402
 
@@ -203,28 +201,3 @@ def test_installation_lookup_caches_per_email(private_key):
     assert calls["n"] == 1
 
 
-def test_is_auth_romaine_token_matches_issuer_prefix(private_key):
-    auth_romaine_token = _service_jwt(private_key)
-    tank_token = jwt.encode(
-        {
-            "iss": "tank-operator",
-            "aud": "mcp-github-tank",
-            "sub": "u-owner",
-            "iat": int(time.time()),
-            "exp": int(time.time()) + 60,
-        },
-        private_key,
-        algorithm="RS256",
-    )
-
-    assert is_auth_romaine_token(f"Bearer {auth_romaine_token}") is True
-    assert is_auth_romaine_token(f"Bearer {tank_token}") is False
-    assert is_auth_romaine_token(None) is False
-    assert is_auth_romaine_token("") is False
-    assert is_auth_romaine_token("not-a-bearer") is False
-    assert is_auth_romaine_token("Bearer not.a.jwt") is False
-
-
-def test_unverified_issuer_returns_iss_without_verification(private_key):
-    token = _service_jwt(private_key)
-    assert unverified_issuer(f"Bearer {token}") == "https://auth.romaine.life"
