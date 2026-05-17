@@ -1,10 +1,17 @@
 """HTTP entrypoint for Tank's GitHub MCP server.
 
-Incoming auth is a Tank-signed session attestation. The session pod's
-local mcp-auth-proxy gets that JWT from Tank and forwards it as bearer
-auth to this service. The middleware verifies the JWT, stashes the
-caller in a ContextVar, and the tool layer picks the right GitHub App
-installation for each request.
+Incoming auth dispatches on the JWT's ``iss`` claim:
+
+  - ``iss=https://auth.romaine.life`` → ``AuthRomaineLifeAuthenticator``
+    (role=service token; installation_id resolved via tank-operator
+    /api/internal/github/installation).
+  - ``iss=tank-operator`` → ``TankJWTAuthenticator`` (the legacy Tank
+    session attestation path that carries installation_id directly).
+
+Both produce a ``CallerIdentity``; the tool layer doesn't see which
+path fired. The Tank-attestation path will be retired once
+mcp-auth-proxy in session pods switches to forwarding the
+auth.romaine.life service JWT.
 """
 
 import logging
@@ -21,6 +28,11 @@ from starlette.responses import Response
 from starlette.routing import Mount, Route
 
 from .auth import GitHubAppTokenMinter
+from .auth_romaine import (
+    AuthRomaineLifeAuthenticator,
+    default_authenticator as default_auth_romaine_authenticator,
+    is_auth_romaine_token,
+)
 from .caller import CALLER, CallerAuthError, TankJWTAuthenticator
 from .github_client import GitHubClient
 from .minter_pool import MinterPool
@@ -37,18 +49,36 @@ def _req(name: str) -> str:
 
 
 class CallerAuthMiddleware(BaseHTTPMiddleware):
-    """Authenticate the Tank caller per request and bind it to the ContextVar."""
+    """Authenticate the caller per request and bind it to the ContextVar.
 
-    def __init__(self, app, authenticator: TankJWTAuthenticator) -> None:
+    Dispatches on the JWT's unverified ``iss`` claim:
+      - auth.romaine.life issuer → ``auth_romaine`` (preferred path,
+        resolves installation_id via tank-operator at request time)
+      - anything else → ``tank`` (the Tank session attestation
+        authenticator)
+    """
+
+    def __init__(
+        self,
+        app,
+        *,
+        tank: TankJWTAuthenticator,
+        auth_romaine: AuthRomaineLifeAuthenticator,
+    ) -> None:
         super().__init__(app)
-        self._authenticator = authenticator
+        self._tank = tank
+        self._auth_romaine = auth_romaine
 
     async def dispatch(self, request: Request, call_next):
         if request.url.path == "/healthz":
             caller = None
         else:
+            authorization = request.headers.get("authorization")
             try:
-                caller = self._authenticator.authenticate(request.headers.get("authorization"))
+                if is_auth_romaine_token(authorization):
+                    caller = self._auth_romaine.authenticate(authorization)
+                else:
+                    caller = self._tank.authenticate(authorization)
             except CallerAuthError as exc:
                 return Response(f"caller authentication failed: {exc}", status_code=401)
         token = CALLER.set(caller)
@@ -83,7 +113,7 @@ def build_app() -> Starlette:
         tank_operator_private_key=_req("TANK_OPERATOR_APP_PRIVATE_KEY"),
     )
     log.info(
-        "Tank GitHub MCP auth active: requests require aud=mcp-github-tank attestations"
+        "GitHub MCP auth active: accepts auth.romaine.life service JWTs and Tank session attestations"
     )
     register_tools(mcp, GitHubClient(pool))
 
@@ -97,7 +127,8 @@ def build_app() -> Starlette:
         # so the client can reconnect cleanly after a pod restart.
         return Response(status_code=200)
 
-    authenticator = TankJWTAuthenticator()
+    tank_authenticator = TankJWTAuthenticator()
+    auth_romaine_authenticator = default_auth_romaine_authenticator()
 
     # Starlette's Mount doesn't forward lifespan events to the inner app, so
     # FastMCP's session_manager.run() never fires when we mount it. Wire the
@@ -114,7 +145,11 @@ def build_app() -> Starlette:
             Mount("/", app=mcp.streamable_http_app()),
         ],
         middleware=[
-            Middleware(CallerAuthMiddleware, authenticator=authenticator),
+            Middleware(
+                CallerAuthMiddleware,
+                tank=tank_authenticator,
+                auth_romaine=auth_romaine_authenticator,
+            ),
         ],
         lifespan=lifespan,
     )

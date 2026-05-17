@@ -35,6 +35,18 @@ spec:
               value: "{{ .Values.tankOperator.issuer }}"
             - name: TANK_OPERATOR_JWT_AUDIENCE
               value: "{{ .Values.tankOperator.audience }}"
+            # auth.romaine.life path — when the inbound JWT issuer is
+            # auth.romaine.life, the JWT is verified against this JWKS
+            # and installation routing is resolved against tank-operator's
+            # GET /api/internal/github/installation. Tank-attestation
+            # remains accepted for callers that still send it; mcp-auth-proxy
+            # is the upstream switch.
+            - name: AUTH_ROMAINE_LIFE_ISSUER
+              value: "{{ .Values.authRomaineLife.issuer }}"
+            - name: AUTH_ROMAINE_LIFE_JWKS_URL
+              value: "{{ .Values.authRomaineLife.jwksUrl }}"
+            - name: TANK_OPERATOR_INSTALLATION_URL
+              value: "{{ .Values.tankOperator.installationUrl }}"
           readinessProbe:
             httpGet:
               path: /healthz
