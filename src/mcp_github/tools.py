@@ -29,6 +29,65 @@ def _is_404(exc: Exception) -> bool:
     return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404
 
 
+def list_installation_repositories_result(
+    gh: GitHubClient,
+    *,
+    owner: str | None = None,
+    name_contains: str | None = None,
+    visibility: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Build the list_installation_repos tool result.
+
+    This helper pins the public MCP response contract outside the FastMCP
+    decorator layer: callers receive a ``repositories`` array plus count and
+    pagination metadata. Product APIs that prefer the shorter ``repos`` name
+    should translate at their boundary instead of changing this MCP shape.
+    """
+    cap = _clamp_limit(limit, default=100) if limit is not None else None
+    rows: list[dict[str, Any]] = []
+    page = 1
+    needle = name_contains.lower() if name_contains else None
+    visibility_filter = visibility.lower() if visibility else None
+    while True:
+        body = gh.get("/installation/repositories", params={"per_page": 100, "page": page})
+        repos = body.get("repositories", [])
+        if not repos:
+            break
+        for r in repos:
+            full_name = r["full_name"]
+            repo_owner, repo_name = full_name.split("/", 1)
+            if owner and repo_owner.lower() != owner.lower():
+                continue
+            if visibility_filter == "private" and not r["private"]:
+                continue
+            if visibility_filter == "public" and r["private"]:
+                continue
+            if needle and needle not in full_name.lower() and needle not in repo_name.lower():
+                continue
+            rows.append(
+                {
+                    "full_name": full_name,
+                    "private": r["private"],
+                    "default_branch": r["default_branch"],
+                }
+            )
+        if len(repos) < 100:
+            break
+        page += 1
+
+    returned_rows = rows[:cap] if cap is not None else rows
+    truncated = cap is not None and len(rows) > cap
+    return {
+        "repositories": returned_rows,
+        "count": len(returned_rows),
+        "total_count": len(rows),
+        "truncated": truncated,
+        "has_more": truncated,
+        "limit": cap,
+    }
+
+
 def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
     @mcp.tool()
     def list_user_app_installations(limit: int | None = None) -> dict[str, Any]:
@@ -174,48 +233,13 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         returned. Responses include count metadata so truncated results are
         explicit.
         """
-        cap = _clamp_limit(limit, default=100) if limit is not None else None
-        rows: list[dict[str, Any]] = []
-        page = 1
-        needle = name_contains.lower() if name_contains else None
-        visibility_filter = visibility.lower() if visibility else None
-        while True:
-            body = gh.get("/installation/repositories", params={"per_page": 100, "page": page})
-            repos = body.get("repositories", [])
-            if not repos:
-                break
-            for r in repos:
-                full_name = r["full_name"]
-                repo_owner, repo_name = full_name.split("/", 1)
-                if owner and repo_owner.lower() != owner.lower():
-                    continue
-                if visibility_filter == "private" and not r["private"]:
-                    continue
-                if visibility_filter == "public" and r["private"]:
-                    continue
-                if needle and needle not in full_name.lower() and needle not in repo_name.lower():
-                    continue
-                rows.append(
-                    {
-                        "full_name": full_name,
-                        "private": r["private"],
-                        "default_branch": r["default_branch"],
-                    }
-                )
-            if len(repos) < 100:
-                break
-            page += 1
-
-        returned_rows = rows[:cap] if cap is not None else rows
-        truncated = cap is not None and len(rows) > cap
-        return {
-            "repositories": returned_rows,
-            "count": len(returned_rows),
-            "total_count": len(rows),
-            "truncated": truncated,
-            "has_more": truncated,
-            "limit": cap,
-        }
+        return list_installation_repositories_result(
+            gh,
+            owner=owner,
+            name_contains=name_contains,
+            visibility=visibility,
+            limit=limit,
+        )
 
     @mcp.tool()
     def mint_clone_token(
