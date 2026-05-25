@@ -1,0 +1,35 @@
+name: Infrastructure
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - '.github/workflows/tofu.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - '.github/workflows/tofu.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: opentofu-mcp-github
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  tofu:
+    uses: nelsong6/pipeline-templates/.github/workflows/tofu-plan-apply-template.yml@main
+    with:
+      working_directory: infra
+      backend_resource_group: infra
+      backend_storage_account: nelsontofu
+      backend_container: tfstate
+      backend_key: mcp-github.tfstate
+      tofu_version: '1.12.0'
+    secrets: inherit
