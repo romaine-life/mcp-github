@@ -1,8 +1,8 @@
 # ============================================================================
 # mcp-github values
 # ============================================================================
-# GitHub App credentials come from KV via ExternalSecret. Incoming caller
-# identity comes from an auth.romaine.life-issued role=service JWT;
+# GitHub App credentials come from the app-owned Key Vault via ExternalSecret.
+# Incoming caller identity comes from an auth.romaine.life-issued role=service JWT;
 # installation_id is resolved at request time via tank-operator's
 # /api/internal/github/installation endpoint.
 
@@ -23,6 +23,11 @@ tankOperator:
 authRomaineLife:
   issuer: https://auth.romaine.life
   jwksUrl: https://auth.romaine.life/api/auth/jwks
+
+externalSecret:
+  storeName: ng6-mcp-github
+  storeKind: ClusterSecretStore
+  vaultUrl: https://ng6-mcp-github.vault.azure.net/
 
 resources:
   requests:
