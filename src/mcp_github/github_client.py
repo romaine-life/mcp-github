@@ -289,6 +289,41 @@ class GitHubClient:
         _check(r)
         return r.json() if r.content else None
 
+    def graphql(
+        self,
+        query: str,
+        variables: dict[str, Any] | None = None,
+        *,
+        repo: tuple[str, str] | None = None,
+    ) -> Any:
+        """POST a query/mutation to the GitHub GraphQL (v4) API.
+
+        Some operations have no REST equivalent — notably converting a
+        draft pull request to ready-for-review, which only exists as the
+        ``markPullRequestReadyForReview`` mutation. Routes through the same
+        per-caller minter + host fallback as the REST helpers so callers
+        targeting a host-owned repo from a user installation still work.
+
+        Transport failures raise via ``_check``. GraphQL surfaces logical
+        errors as HTTP 200 with a top-level ``errors`` array, so those are
+        promoted to a ``RuntimeError`` here rather than silently returning
+        ``data: null``.
+        """
+        r = self._with_fallback(
+            lambda h: httpx.post(
+                f"{GITHUB_API}/graphql",
+                headers=h,
+                json={"query": query, "variables": variables or {}},
+                timeout=15.0,
+            ),
+            repo=repo,
+        )
+        _check(r)
+        data = r.json()
+        if data.get("errors"):
+            raise RuntimeError(f"GitHub GraphQL error: {data['errors']}")
+        return data.get("data")
+
     def mint_scoped_token(
         self,
         *,

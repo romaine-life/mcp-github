@@ -655,6 +655,31 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         return {"merged": r.get("merged", False), "sha": r.get("sha"), "message": r.get("message")}
 
     @mcp.tool()
+    def mark_pull_request_ready_for_review(owner: str, name: str, number: int) -> dict[str, Any]:
+        """Convert a draft GitHub pull request (PR) to ready-for-review.
+
+        GitHub's REST API cannot clear the draft flag — a draft PR rejects
+        merge_pull_request with 405 "Pull Request is still a draft". This uses
+        the GraphQL `markPullRequestReadyForReview` mutation (the only API that
+        can). Call it before merge_pull_request when a PR was opened as a draft
+        (the common case for PRs opened by the /test workflow). Idempotent: a
+        PR that is already ready returns is_draft=false without error.
+        """
+        pr = gh.get(f"/repos/{owner}/{name}/pulls/{number}", repo=(owner, name))
+        data = gh.graphql(
+            "mutation($id:ID!){"
+            "markPullRequestReadyForReview(input:{pullRequestId:$id}){"
+            "pullRequest{number isDraft}}}",
+            {"id": pr["node_id"]},
+            repo=(owner, name),
+        )
+        pr_out = ((data or {}).get("markPullRequestReadyForReview") or {}).get("pullRequest") or {}
+        return {
+            "number": pr_out.get("number", number),
+            "is_draft": pr_out.get("isDraft", pr.get("draft")),
+        }
+
+    @mcp.tool()
     def request_review(owner: str, name: str, number: int, reviewers: list[str] | None = None, team_reviewers: list[str] | None = None) -> dict[str, Any]:
         """Request GitHub pull request (PR) reviews from users or teams.
 
