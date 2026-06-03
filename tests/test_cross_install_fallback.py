@@ -58,7 +58,7 @@ def _caller(
 
 
 def _fake_response(status: int, body: str = "") -> httpx.Response:
-    req = httpx.Request("GET", "https://api.github.com/repos/nelsong6/tank-operator")
+    req = httpx.Request("GET", "https://api.github.com/repos/romaine-life/tank-operator")
     return httpx.Response(status_code=status, text=body, request=req)
 
 
@@ -185,16 +185,16 @@ def test_get_uses_user_minter_when_repo_accessible() -> None:
     def fake_get(url, *, headers, params, timeout):
         calls.append(headers["Authorization"].split()[1])
         req = httpx.Request("GET", url)
-        return httpx.Response(200, json={"full_name": "nelsong6/tank-operator"}, request=req)
+        return httpx.Response(200, json={"full_name": "romaine-life/tank-operator"}, request=req)
 
     token = CALLER.set(caller)
     try:
         with patch("mcp_github.github_client.httpx.get", side_effect=fake_get):
-            result = client.get("/repos/nelsong6/tank-operator", repo=("nelsong6", "tank-operator"))
+            result = client.get("/repos/romaine-life/tank-operator", repo=("nelsong6", "tank-operator"))
     finally:
         CALLER.reset(token)
 
-    assert result["full_name"] == "nelsong6/tank-operator"
+    assert result["full_name"] == "romaine-life/tank-operator"
     assert calls == ["user-tok"], "should have used user token, not host"
 
 
@@ -220,16 +220,16 @@ def test_get_falls_back_to_host_on_404_and_primes_cache() -> None:
         req = httpx.Request("GET", url)
         if tok == "user-tok":
             return httpx.Response(404, text='{"message":"Not Found"}', request=req)
-        return httpx.Response(200, json={"full_name": "nelsong6/tank-operator"}, request=req)
+        return httpx.Response(200, json={"full_name": "romaine-life/tank-operator"}, request=req)
 
     token = CALLER.set(caller)
     try:
         with patch("mcp_github.github_client.httpx.get", side_effect=fake_get):
-            result = client.get("/repos/nelsong6/tank-operator", repo=("nelsong6", "tank-operator"))
+            result = client.get("/repos/romaine-life/tank-operator", repo=("nelsong6", "tank-operator"))
     finally:
         CALLER.reset(token)
 
-    assert result["full_name"] == "nelsong6/tank-operator"
+    assert result["full_name"] == "romaine-life/tank-operator"
     assert call_tokens == ["user-tok", "host-tok"], "should have tried user then host"
     # Cache should now say user install can't serve this repo.
     assert not pool.caller_can_serve_repo(caller, "nelsong6", "tank-operator")
@@ -261,7 +261,7 @@ def test_get_falls_back_on_403_resource_not_accessible() -> None:
     token = CALLER.set(caller)
     try:
         with patch("mcp_github.github_client.httpx.get", side_effect=fake_get):
-            client.get("/repos/nelsong6/tank-operator", repo=("nelsong6", "tank-operator"))
+            client.get("/repos/romaine-life/tank-operator", repo=("nelsong6", "tank-operator"))
     finally:
         CALLER.reset(token)
 
@@ -290,7 +290,7 @@ def test_normal_user_does_not_fall_back_to_host_on_404() -> None:
     try:
         with patch("mcp_github.github_client.httpx.get", side_effect=fake_get):
             with pytest.raises(httpx.HTTPStatusError):
-                client.get("/repos/nelsong6/tank-operator", repo=("nelsong6", "tank-operator"))
+                client.get("/repos/romaine-life/tank-operator", repo=("nelsong6", "tank-operator"))
     finally:
         CALLER.reset(token)
 
@@ -319,7 +319,7 @@ def test_subsequent_call_skips_user_install_when_cached() -> None:
     token = CALLER.set(caller)
     try:
         with patch("mcp_github.github_client.httpx.get", side_effect=fake_get):
-            client.get("/repos/nelsong6/tank-operator", repo=("nelsong6", "tank-operator"))
+            client.get("/repos/romaine-life/tank-operator", repo=("nelsong6", "tank-operator"))
     finally:
         CALLER.reset(token)
 
@@ -343,7 +343,7 @@ def test_both_fail_raises_original_404() -> None:
     try:
         with patch("mcp_github.github_client.httpx.get", side_effect=fake_get):
             with pytest.raises(httpx.HTTPStatusError) as exc_info:
-                client.get("/repos/nelsong6/tank-operator", repo=("nelsong6", "tank-operator"))
+                client.get("/repos/romaine-life/tank-operator", repo=("nelsong6", "tank-operator"))
     finally:
         CALLER.reset(token)
 
@@ -375,7 +375,7 @@ def test_host_caller_does_not_trigger_fallback() -> None:
     try:
         with patch("mcp_github.github_client.httpx.get", side_effect=fake_get):
             with pytest.raises(httpx.HTTPStatusError):
-                client.get("/repos/nelsong6/tank-operator", repo=("nelsong6", "tank-operator"))
+                client.get("/repos/romaine-life/tank-operator", repo=("nelsong6", "tank-operator"))
     finally:
         CALLER.reset(token)
 

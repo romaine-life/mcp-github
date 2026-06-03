@@ -267,7 +267,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         Returns: {"token": "...", "expires_at": "<iso8601>"}.
         """
         if not repos:
-            raise ValueError("mint_clone_token: pass at least one repo (e.g. ['nelsong6/glimmung'])")
+            raise ValueError("mint_clone_token: pass at least one repo (e.g. ['romaine-life/glimmung'])")
         if workflows and not write:
             raise ValueError("mint_clone_token: workflows=True requires write=True")
         repo_names: list[str] = []
