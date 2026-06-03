@@ -80,15 +80,21 @@ def build_app() -> Starlette:
         ),
     )
 
+    host_app_id = _req("GITHUB_APP_ID")
+    host_private_key = _req("GITHUB_APP_PRIVATE_KEY")
     host_minter = GitHubAppTokenMinter(
-        _req("GITHUB_APP_ID"),
+        host_app_id,
         _req("GITHUB_APP_INSTALLATION_ID"),
-        _req("GITHUB_APP_PRIVATE_KEY"),
+        host_private_key,
     )
     pool = MinterPool(
         host_minter=host_minter,
         tank_operator_app_id=_req("TANK_OPERATOR_APP_ID"),
         tank_operator_private_key=_req("TANK_OPERATOR_APP_PRIVATE_KEY"),
+        # Lets the host minter resolve installations per owner so host
+        # callers can reach the romaine-life org, not just the default install.
+        host_app_id=host_app_id,
+        host_private_key=host_private_key,
     )
     log.info("GitHub MCP auth active: requires auth.romaine.life role=service JWTs")
     register_tools(mcp, GitHubClient(pool))

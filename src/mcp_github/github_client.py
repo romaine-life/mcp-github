@@ -103,8 +103,9 @@ class GitHubClient:
             and caller.is_super_admin
             and _is_cross_install_failure(r)
         ):
-            # User installation can't see this repo. Try the host.
-            host_token = self._pool.host.installation_token()
+            # User installation can't see this repo. Try the host App's
+            # installation for that repo's owner.
+            host_token = self._pool.host_for_owner(repo[0]).installation_token()
             r2 = make_request(self._headers(host_token))
             if r2.is_success:
                 if caller is not None:
@@ -339,21 +340,32 @@ class GitHubClient:
         all listed repos are recorded as inaccessible in the pool.
         """
         caller = current_caller()
-        minter = self._pool.for_caller(caller)
+        owner = repos_full[0][0] if repos_full else None
+        # Host caller scopes a clone token from the host App's installation
+        # for the repo's owner (e.g. the romaine-life org), not just the
+        # single default installation.
+        if caller is not None and caller.is_host and owner is not None:
+            minter = self._pool.host_for_owner(owner)
+        else:
+            minter = self._pool.for_caller(caller)
         try:
             return minter.mint_scoped_token(
                 repositories=repositories, permissions=permissions
             )
         except httpx.HTTPStatusError as original:
+            fallback = (
+                self._pool.host_for_owner(owner) if owner else self._pool.host
+            )
             if (
                 repos_full
                 and minter is not self._pool.host
+                and fallback is not minter
                 and caller is not None
                 and caller.is_super_admin
                 and original.response.status_code in (404, 422)
             ):
                 try:
-                    token, expires = self._pool.host.mint_scoped_token(
+                    token, expires = fallback.mint_scoped_token(
                         repositories=repositories, permissions=permissions
                     )
                 except httpx.HTTPStatusError:
