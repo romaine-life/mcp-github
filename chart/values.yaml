@@ -14,6 +14,7 @@ image:
 port: 8080
 
 tankOperator:
+  internalUrl: http://tank-operator.tank-operator.svc.cluster.local
   # Resolves caller's email → {installation_id, is_host, is_super_admin}.
   # mcp-github forwards the caller's inbound auth.romaine.life JWT as
   # Bearer, so the lookup is scoped to the caller's own actor_email
@@ -35,3 +36,7 @@ resources:
     memory: 128Mi
   limits:
     memory: 256Mi
+
+observability:
+  enabled: true
+  scrapeInterval: 30s

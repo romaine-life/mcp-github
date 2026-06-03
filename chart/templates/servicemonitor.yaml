@@ -1,0 +1,18 @@
+{{- if .Values.observability.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mcp-github
+  namespace: mcp-github
+  labels:
+    app: mcp-github
+spec:
+  selector:
+    matchLabels:
+      app: mcp-github
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.observability.scrapeInterval | default "30s" | quote }}
+      scrapeTimeout: 10s
+{{- end }}

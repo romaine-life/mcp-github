@@ -140,6 +140,7 @@ class AuthRomaineLifeAuthenticator:
             session_scope=session_scope,
             session_id=session_id,
             pod_name="",
+            service_bearer=token,
         )
 
     def _resolve_installation(self, email: str, bearer: str) -> _CachedInstallation:
@@ -204,5 +205,4 @@ def default_authenticator() -> AuthRomaineLifeAuthenticator:
             "TANK_OPERATOR_INSTALLATION_URL", DEFAULT_TANK_OPERATOR_INSTALLATION_URL
         ),
     )
-
 
