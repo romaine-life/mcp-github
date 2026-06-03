@@ -271,21 +271,26 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         if workflows and not write:
             raise ValueError("mint_clone_token: workflows=True requires write=True")
         repo_names: list[str] = []
+        repos_full: list[tuple[str, str]] = []
         for r in repos:
             if "/" not in r:
                 raise ValueError(f"repo must be 'owner/name', got: {r}")
-            repo_names.append(r.split("/", 1)[1])
+            repo_owner, repo_name = r.split("/", 1)
+            repo_names.append(repo_name)
+            repos_full.append((repo_owner, repo_name))
         permissions: dict[str, str] = {
             "contents": "write" if write else "read",
             "metadata": "read",
         }
         if workflows:
             permissions["workflows"] = "write"
-        # mint_scoped_token falls back to the host minter when the caller's
-        # installation returns 403/422 (repos the installation can't access).
+        # repos_full lets the client pick the host App installation for the
+        # repo's owner (e.g. the romaine-life org) and fall back across
+        # installations on 403/422.
         token, expires_at = gh.mint_scoped_token(
             repositories=repo_names,
             permissions=permissions,
+            repos_full=repos_full,
         )
         return {"token": token, "expires_at": expires_at}
 
