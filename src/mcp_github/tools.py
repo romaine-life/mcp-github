@@ -284,8 +284,8 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         }
         if workflows:
             permissions["workflows"] = "write"
-        # repos_full lets the client pick the host App installation for the
-        # repo's owner (e.g. the romaine-life org) and fall back across
+        # repos_full lets the client pick the Tank host App installation for
+        # the repo's owner (e.g. the romaine-life org) and fall back across
         # installations on 403/422.
         token, expires_at = gh.mint_scoped_token(
             repositories=repo_names,

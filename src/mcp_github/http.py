@@ -91,7 +91,7 @@ def build_app() -> Starlette:
         host_minter=host_minter,
         tank_operator_app_id=_req("TANK_OPERATOR_APP_ID"),
         tank_operator_private_key=_req("TANK_OPERATOR_APP_PRIVATE_KEY"),
-        # Lets the host minter resolve installations per owner so host
+        # Lets the Tank host App minter resolve installations per owner so host
         # callers can reach the romaine-life org, not just the default install.
         host_app_id=host_app_id,
         host_private_key=host_private_key,

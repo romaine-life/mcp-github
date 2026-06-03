@@ -103,7 +103,7 @@ class GitHubClient:
             and caller.is_super_admin
             and _is_cross_install_failure(r)
         ):
-            # User installation can't see this repo. Try the host App's
+            # User installation can't see this repo. Try the Tank host App
             # installation for that repo's owner.
             host_token = self._pool.host_for_owner(repo[0]).installation_token()
             r2 = make_request(self._headers(host_token))
@@ -341,9 +341,9 @@ class GitHubClient:
         """
         caller = current_caller()
         owner = repos_full[0][0] if repos_full else None
-        # Host caller scopes a clone token from the host App's installation
-        # for the repo's owner (e.g. the romaine-life org), not just the
-        # single default installation.
+        # Host caller scopes a clone token from the Tank host App installation
+        # for the repo's owner (e.g. the romaine-life org), not just the single
+        # default installation.
         if caller is not None and caller.is_host and owner is not None:
             minter = self._pool.host_for_owner(owner)
         else:
