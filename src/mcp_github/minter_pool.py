@@ -1,23 +1,17 @@
 """Per-caller GitHub App minter selection (#57 stage 3).
 
-Two GitHub Apps live in this cluster (see ``tank-operator/CLAUDE.md`` →
-"Two GitHub Apps live alongside each other"):
+This MCP is backed by Tank-owned GitHub Apps:
 
-- ``romaine-life-app`` — the host's dev/automation bot. Already
-  installed on host-owned repos. Process-wide minter built from the
-  ``GITHUB_APP_*`` env vars.
-- ``tank-operator-romaine-life`` — the user-facing App. Each
-  non-host user installs this on *their* repos via the SPA's
-  onboarding flow (#57 stage 2). One App, many installations,
-  one ``installation_id`` per user (stored on their Cosmos
-  profile row). Loaded from the new ``TANK_OPERATOR_APP_*``
-  ExternalSecret entries — the App identity is constant; we
-  vary the ``installation_id`` per caller.
+- The org-private host app, built from the ``GITHUB_APP_*`` env vars, covers
+  Tank-owned automation against repos in the romaine-life organization.
+- The user-facing ``tank-operator-romaine-life`` app is installed by non-host
+  users on their own repos via the SPA's onboarding flow (#57 stage 2). Those
+  calls are minted from the ``TANK_OPERATOR_APP_*`` identity plus the per-user
+  ``installation_id`` stored on their profile row.
 
 The pool's job is to pick the right minter per caller:
 
-- Caller is the host (``is_host=true``) → host minter, no change
-  from today.
+- Caller is the host (``is_host=true``) → Tank's org-private host app.
 - Caller is non-host with an installation_id → tank-operator-app
   minter scoped to that user's installation.
 - Caller is non-host without an installation_id → unsupported. The
@@ -52,9 +46,9 @@ log = logging.getLogger(__name__)
 # get correct routing within half an hour without a server restart.
 REPO_ACCESS_CACHE_TTL = 1800.0
 
-# How long to cache the host App's account-login → installation-id map
+# How long to cache the Tank host App's account-login → installation-id map
 # (from GET /app/installations) before re-listing. Short enough that
-# installing the host App on a new account is picked up without a restart.
+# installing the Tank host App on a new account is picked up without a restart.
 HOST_INSTALLATIONS_CACHE_TTL = 600.0
 
 
@@ -69,7 +63,7 @@ class MinterPool:
         host_private_key: str | None = None,
     ) -> None:
         self._host = host_minter
-        # Host App credentials, used to resolve the host installation *per
+        # Tank host App credentials, used to resolve the installation *per
         # owner* (via GET /app/installations) so host/super-admin callers can
         # reach repos under any account the host App is installed on — e.g.
         # the romaine-life org — instead of only the single installation baked
@@ -93,14 +87,14 @@ class MinterPool:
 
     @property
     def host(self) -> GitHubAppTokenMinter:
-        """The host romaine-life-app minter for the default installation
+        """The Tank host App minter for the default installation
         (GITHUB_APP_INSTALLATION_ID). Exposed so ``GitHubClient`` can retry
         with the host token on cross-installation failures. Prefer
         ``host_for_owner`` when the target repo's owner is known."""
         return self._host
 
     def _refresh_host_installations(self) -> None:
-        """Re-list the host App's installations into an owner→id map."""
+        """Re-list the Tank host App's installations into an owner→id map."""
         token = GitHubAppTokenMinter.app_jwt(
             self._host_app_id, self._host_private_key
         )
@@ -135,10 +129,10 @@ class MinterPool:
     def host_for_owner(self, owner: str) -> GitHubAppTokenMinter:
         """Return a host-App minter scoped to ``owner``'s installation.
 
-        Resolves the host App's installation for the given account from
+        Resolves the Tank host App's installation for the given account from
         GET /app/installations (cached), so a host/super-admin caller can
         operate on repos under any account the host App is installed on.
-        Falls back to the default host minter (``_host``) when host App
+        Falls back to the default host minter (``_host``) when app
         credentials are not configured or the owner has no installation —
         existing single-installation behaviour is preserved.
         """
@@ -155,7 +149,7 @@ class MinterPool:
             try:
                 self._refresh_host_installations()
             except httpx.HTTPError:
-                log.warning("could not list host App installations for %s", owner)
+                log.warning("could not list Tank host App installations for %s", owner)
         with self._lock:
             inst_id = self._host_installations.get(key)
             if inst_id is None:
@@ -251,7 +245,7 @@ class MinterPool:
         confirms the caller's installation can't serve this repo, saving
         a doomed round-trip. Otherwise delegates to ``for_caller``.
         """
-        # Host caller targeting a known repo: route to the host App's
+        # Host caller targeting a known repo: route to the Tank host App
         # installation for that repo's owner (e.g. the romaine-life org),
         # not just the single default host installation.
         if caller is not None and caller.is_host and repo is not None:
