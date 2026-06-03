@@ -43,6 +43,35 @@ App, not a personal-account App and not a generic shared App. It is public only
 because GitHub requires public Apps for installation on accounts outside the
 owning org. Current production slug: `romaine-life-tank-operator`.
 
+## Control Action Audit
+
+PR lifecycle tools that can put code onto a protected branch are audited through
+Tank before they mutate GitHub:
+
+- `mark_pull_request_ready_for_review`
+- `merge_pull_request`
+
+For each invocation, `mcp-github` appends a `started` row to Tank's
+`control_action_events` ledger using the caller's service JWT and session id.
+If that write fails, the GitHub mutation is not attempted. After GitHub accepts
+or rejects the mutation, `mcp-github` appends a terminal `succeeded` or
+`failed` row with the PR target and result/error evidence.
+
+Production callers write to the configured production Tank URL. Test-slot
+callers write to their slot orchestrator (`http://tank-operator.<scope>.svc`)
+based on the caller's service-token scope, so the trace appears in the same
+Tank UI where the session is running.
+
+Humans inspect the durable trace in Tank's session Background -> Control tab or
+through `GET /api/sessions/<id>/control-actions`. Loki can still show raw
+GitHub HTTP calls, but it is not the attribution source of truth.
+
+Prometheus scrapes `/metrics` through the chart's ServiceMonitor. Relevant
+counters:
+
+- `mcp_github_control_action_total{tool,action,status,result}`
+- `mcp_github_control_action_audit_append_total{status,result}`
+
 Create the org-owned Tank host App with the GitHub App manifest flow, not
 query parameters on the settings page. The settings page can ignore event
 parameters silently.

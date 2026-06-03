@@ -19,6 +19,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Mount, Route
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .auth import GitHubAppTokenMinter
 from .auth_romaine import (
@@ -26,6 +27,7 @@ from .auth_romaine import (
     default_authenticator as default_auth_romaine_authenticator,
 )
 from .caller import CALLER, CallerAuthError
+from .control_audit import ControlActionAuditor
 from .github_client import GitHubClient
 from .minter_pool import MinterPool
 from .tools import register_tools
@@ -40,6 +42,17 @@ def _req(name: str) -> str:
     return v
 
 
+def _tank_operator_base_url() -> str:
+    configured = os.environ.get("TANK_OPERATOR_INTERNAL_URL", "").strip()
+    if configured:
+        return configured
+    installation_url = _req("TANK_OPERATOR_INSTALLATION_URL")
+    suffix = "/api/internal/github/installation"
+    if installation_url.endswith(suffix):
+        return installation_url[: -len(suffix)]
+    raise RuntimeError("TANK_OPERATOR_INTERNAL_URL is required when TANK_OPERATOR_INSTALLATION_URL has a custom path")
+
+
 class CallerAuthMiddleware(BaseHTTPMiddleware):
     """Authenticate the caller per request and bind it to the ContextVar.
 
@@ -52,7 +65,7 @@ class CallerAuthMiddleware(BaseHTTPMiddleware):
         self._authenticator = authenticator
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path == "/healthz":
+        if request.url.path in {"/healthz", "/metrics"}:
             caller = None
         else:
             try:
@@ -97,10 +110,13 @@ def build_app() -> Starlette:
         host_private_key=host_private_key,
     )
     log.info("GitHub MCP auth active: requires auth.romaine.life role=service JWTs")
-    register_tools(mcp, GitHubClient(pool))
+    register_tools(mcp, GitHubClient(pool), ControlActionAuditor(_tank_operator_base_url()))
 
     async def healthz(_: Request) -> Response:
         return Response("ok", media_type="text/plain")
+
+    async def metrics(_: Request) -> Response:
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     async def delete_session(_: Request) -> Response:
         # MCP streamable-http spec says stateless servers SHOULD return 405
@@ -122,6 +138,7 @@ def build_app() -> Starlette:
     return Starlette(
         routes=[
             Route("/healthz", healthz),
+            Route("/metrics", metrics),
             Route("/", delete_session, methods=["DELETE"]),
             Mount("/", app=mcp.streamable_http_app()),
         ],

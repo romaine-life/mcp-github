@@ -35,6 +35,8 @@ spec:
               value: "{{ .Values.authRomaineLife.jwksUrl }}"
             - name: TANK_OPERATOR_INSTALLATION_URL
               value: "{{ .Values.tankOperator.installationUrl }}"
+            - name: TANK_OPERATOR_INTERNAL_URL
+              value: "{{ .Values.tankOperator.internalUrl }}"
           readinessProbe:
             httpGet:
               path: /healthz

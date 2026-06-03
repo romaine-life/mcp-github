@@ -4,7 +4,9 @@ from typing import Any
 import httpx
 from mcp.server.fastmcp import FastMCP
 
+from .control_audit import ControlActionAuditor
 from .github_client import GitHubClient
+from .metrics import record_control_action
 
 
 def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -29,7 +31,7 @@ def _is_404(exc: Exception) -> bool:
     return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404
 
 
-def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
+def register_tools(mcp: FastMCP, gh: GitHubClient, auditor: ControlActionAuditor) -> None:
     @mcp.tool()
     def list_user_app_installations(limit: int | None = None) -> dict[str, Any]:
         """Super-admin only: list installations of the user-facing Tank GitHub App."""
@@ -651,13 +653,75 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         Use after checking review and CI status. `merge_method` is merge,
         squash, or rebase; optional title/message customize the merge commit.
         """
+        pr = gh.get(f"/repos/{owner}/{name}/pulls/{number}", repo=(owner, name))
+        target_ref = pr.get("html_url") or f"https://github.com/{owner}/{name}/pull/{number}"
+        invocation = auditor.start(
+            source_tool="merge_pull_request",
+            action="github.pull_request.merge",
+            target_kind="github_pull_request",
+            target_ref=target_ref,
+            repo_owner=owner,
+            repo_name=name,
+            pr_number=number,
+            payload={
+                "merge_method": merge_method,
+                "head_sha": ((pr.get("head") or {}).get("sha") or ""),
+                "base_sha": ((pr.get("base") or {}).get("sha") or ""),
+                "draft": bool(pr.get("draft")),
+                "state": pr.get("state"),
+            },
+        )
+        record_control_action("merge_pull_request", "github.pull_request.merge", "started", "ok")
         payload: dict[str, Any] = {"merge_method": merge_method}
         if commit_title is not None:
             payload["commit_title"] = commit_title
         if commit_message is not None:
             payload["commit_message"] = commit_message
-        r = gh.put(f"/repos/{owner}/{name}/pulls/{number}/merge", json=payload, repo=(owner, name))
-        return {"merged": r.get("merged", False), "sha": r.get("sha"), "message": r.get("message")}
+        try:
+            r = gh.put(f"/repos/{owner}/{name}/pulls/{number}/merge", json=payload, repo=(owner, name))
+        except Exception as exc:
+            auditor.finish(
+                invocation,
+                source_tool="merge_pull_request",
+                action="github.pull_request.merge",
+                target_kind="github_pull_request",
+                target_ref=target_ref,
+                repo_owner=owner,
+                repo_name=name,
+                pr_number=number,
+                status="failed",
+                error=str(exc),
+                payload={"merge_method": merge_method},
+            )
+            record_control_action("merge_pull_request", "github.pull_request.merge", "failed", "github_failed")
+            raise
+        result = {"merged": r.get("merged", False), "sha": r.get("sha"), "message": r.get("message")}
+        try:
+            auditor.finish(
+                invocation,
+                source_tool="merge_pull_request",
+                action="github.pull_request.merge",
+                target_kind="github_pull_request",
+                target_ref=target_ref,
+                repo_owner=owner,
+                repo_name=name,
+                pr_number=number,
+                status="succeeded" if result["merged"] else "failed",
+                result_sha=str(result.get("sha") or ""),
+                payload={"merge_method": merge_method, "message": result.get("message")},
+            )
+            result["audit_terminal_recorded"] = True
+            record_control_action(
+                "merge_pull_request",
+                "github.pull_request.merge",
+                "succeeded" if result["merged"] else "failed",
+                "ok",
+            )
+        except Exception as exc:
+            result["audit_terminal_recorded"] = False
+            result["audit_error"] = str(exc)
+            record_control_action("merge_pull_request", "github.pull_request.merge", "succeeded", "audit_failed")
+        return result
 
     @mcp.tool()
     def mark_pull_request_ready_for_review(owner: str, name: str, number: int) -> dict[str, Any]:
@@ -671,18 +735,86 @@ def register_tools(mcp: FastMCP, gh: GitHubClient) -> None:
         PR that is already ready returns is_draft=false without error.
         """
         pr = gh.get(f"/repos/{owner}/{name}/pulls/{number}", repo=(owner, name))
-        data = gh.graphql(
-            "mutation($id:ID!){"
-            "markPullRequestReadyForReview(input:{pullRequestId:$id}){"
-            "pullRequest{number isDraft}}}",
-            {"id": pr["node_id"]},
-            repo=(owner, name),
+        target_ref = pr.get("html_url") or f"https://github.com/{owner}/{name}/pull/{number}"
+        invocation = auditor.start(
+            source_tool="mark_pull_request_ready_for_review",
+            action="github.pull_request.ready_for_review",
+            target_kind="github_pull_request",
+            target_ref=target_ref,
+            repo_owner=owner,
+            repo_name=name,
+            pr_number=number,
+            payload={
+                "head_sha": ((pr.get("head") or {}).get("sha") or ""),
+                "base_sha": ((pr.get("base") or {}).get("sha") or ""),
+                "draft": bool(pr.get("draft")),
+                "state": pr.get("state"),
+            },
         )
+        record_control_action("mark_pull_request_ready_for_review", "github.pull_request.ready_for_review", "started", "ok")
+        try:
+            data = gh.graphql(
+                "mutation($id:ID!){"
+                "markPullRequestReadyForReview(input:{pullRequestId:$id}){"
+                "pullRequest{number isDraft}}}",
+                {"id": pr["node_id"]},
+                repo=(owner, name),
+            )
+        except Exception as exc:
+            auditor.finish(
+                invocation,
+                source_tool="mark_pull_request_ready_for_review",
+                action="github.pull_request.ready_for_review",
+                target_kind="github_pull_request",
+                target_ref=target_ref,
+                repo_owner=owner,
+                repo_name=name,
+                pr_number=number,
+                status="failed",
+                error=str(exc),
+            )
+            record_control_action(
+                "mark_pull_request_ready_for_review",
+                "github.pull_request.ready_for_review",
+                "failed",
+                "github_failed",
+            )
+            raise
         pr_out = ((data or {}).get("markPullRequestReadyForReview") or {}).get("pullRequest") or {}
-        return {
+        result = {
             "number": pr_out.get("number", number),
             "is_draft": pr_out.get("isDraft", pr.get("draft")),
         }
+        try:
+            auditor.finish(
+                invocation,
+                source_tool="mark_pull_request_ready_for_review",
+                action="github.pull_request.ready_for_review",
+                target_kind="github_pull_request",
+                target_ref=target_ref,
+                repo_owner=owner,
+                repo_name=name,
+                pr_number=number,
+                status="succeeded",
+                payload={"is_draft": result.get("is_draft")},
+            )
+            result["audit_terminal_recorded"] = True
+            record_control_action(
+                "mark_pull_request_ready_for_review",
+                "github.pull_request.ready_for_review",
+                "succeeded",
+                "ok",
+            )
+        except Exception as exc:
+            result["audit_terminal_recorded"] = False
+            result["audit_error"] = str(exc)
+            record_control_action(
+                "mark_pull_request_ready_for_review",
+                "github.pull_request.ready_for_review",
+                "succeeded",
+                "audit_failed",
+            )
+        return result
 
     @mcp.tool()
     def request_review(owner: str, name: str, number: int, reviewers: list[str] | None = None, team_reviewers: list[str] | None = None) -> dict[str, Any]:

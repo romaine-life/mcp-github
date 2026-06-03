@@ -20,6 +20,7 @@ class CallerIdentity:
     session_scope: str = ""
     session_id: str = ""
     pod_name: str = ""
+    service_bearer: str = ""
 
 
 class CallerAuthError(RuntimeError):
