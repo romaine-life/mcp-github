@@ -37,3 +37,33 @@ It also expects the existing user-facing secrets:
 Do not point `GITHUB_APP_*` at a generic org-wide App such as
 `romaine-life-host`, or at the user-facing Tank App. Either shortcut crosses
 subsystem identities and makes a migration look healthy for the wrong reason.
+
+Create the org-owned Tank host App with the GitHub App manifest flow, not
+query parameters on the settings page. The settings page can ignore event
+parameters silently.
+
+```json
+{
+  "name": "tank-operator-host",
+  "url": "https://tank.romaine.life",
+  "hook_attributes": {
+    "url": "https://tank.romaine.life/api/github/webhook"
+  },
+  "redirect_url": "http://localhost:9/github-app-manifest-callback",
+  "public": false,
+  "default_permissions": {
+    "organization_administration": "write",
+    "actions": "write",
+    "actions_variables": "write",
+    "administration": "write",
+    "checks": "read",
+    "contents": "write",
+    "issues": "write",
+    "metadata": "read",
+    "pull_requests": "write",
+    "statuses": "read",
+    "workflows": "write"
+  },
+  "default_events": []
+}
+```
