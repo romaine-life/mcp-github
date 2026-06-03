@@ -20,8 +20,8 @@ Images are SHA-tagged from `main`; `.github/workflows/build.yml` pushes the imag
 
 - `tank-operator-host-*`: an org-owned private GitHub App installed only on
   `romaine-life`, used for Tank host automation.
-- `tank-operator-app-*`: the user-facing GitHub App that standard users install
-  on their own accounts.
+- `tank-operator-app-*`: the public org-owned user-facing GitHub App that
+  standard users install on their own accounts.
 
 The chart expects these host Key Vault secrets:
 
@@ -37,6 +37,11 @@ It also expects the existing user-facing secrets:
 Do not point `GITHUB_APP_*` at a generic org-wide App such as
 `romaine-life-host`, or at the user-facing Tank App. Either shortcut crosses
 subsystem identities and makes a migration look healthy for the wrong reason.
+
+The user-facing App should likewise remain a dedicated `romaine-life` org-owned
+App, not a personal-account App and not a generic shared App. It is public only
+because GitHub requires public Apps for installation on accounts outside the
+owning org. Current production slug: `romaine-life-tank-operator`.
 
 Create the org-owned Tank host App with the GitHub App manifest flow, not
 query parameters on the settings page. The settings page can ignore event
