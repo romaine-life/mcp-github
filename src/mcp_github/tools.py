@@ -242,6 +242,11 @@ def register_tools(mcp: FastMCP, gh: GitHubClient, auditor: ControlActionAuditor
         `write=True` since a workflow-only push without contents-write makes
         no sense.
 
+        This token path is not the GitHub Actions workflow-dispatch path.
+        `workflows=True` lets the token push workflow file edits; it does not
+        grant `actions: write` for `workflow_dispatch`. To manually run an
+        Actions workflow, use the dedicated `dispatch_workflow` MCP tool.
+
         Prefer the dedicated MCP write tools (`commit_to_branch`,
         `create_or_update_file`, etc.) for routine mutations: they resolve
         base refs server-side and avoid the cached-SHA-revert footgun
@@ -264,7 +269,8 @@ def register_tools(mcp: FastMCP, gh: GitHubClient, auditor: ControlActionAuditor
                 Default False (read-only).
             workflows: if True, also include workflows: write so pushes that
                 touch `.github/workflows/*` go through. Requires write=True.
-                Default False.
+                Does not allow Actions workflow dispatch; use
+                `dispatch_workflow` for that. Default False.
 
         Returns: {"token": "...", "expires_at": "<iso8601>"}.
         """
