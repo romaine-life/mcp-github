@@ -2,7 +2,9 @@ from typing import Any
 
 import httpx
 
+from .auth import GitHubAppTokenMinter
 from .caller import CallerIdentity, current_caller
+from .metrics import record_call_401_retry
 from .minter_pool import MinterPool
 
 GITHUB_API = "https://api.github.com"
@@ -78,6 +80,38 @@ class GitHubClient:
             raise PermissionError("GitHub installation fan-out requires super-admin access")
         return caller
 
+    def _refresh_and_retry_on_401(
+        self,
+        make_request,  # callable(headers: dict) -> httpx.Response
+        minter: GitHubAppTokenMinter,
+        stale_token: str,
+        original_response: httpx.Response,
+    ) -> httpx.Response:
+        """Force-refresh ``minter`` and reissue the request once.
+
+        Called only after the original request returned 401 with
+        ``stale_token``. ``minter.force_refresh(stale=stale_token)``
+        single-flights concurrent invalidations through the minter's
+        own lock — N concurrent 401s on the same token result in one
+        upstream ``/access_tokens`` POST. Returns the retry response so
+        the caller can compose the rest of its recovery (cross-install
+        fallback, ``_check``) against it.
+
+        Surfaces a non-401 retry response — even a 403 / 404 — directly
+        so the existing cross-install fallback machinery still applies.
+        A 401 on the retry surfaces as the retry response: at that
+        point the cache has been refreshed once, and a second 401
+        means a real auth problem, not eventual consistency.
+        """
+        fresh = minter.force_refresh(stale=stale_token)
+        retry = make_request(self._headers(fresh))
+        verb = original_response.request.method if original_response.request else "other"
+        record_call_401_retry(
+            verb=verb,
+            result="ok" if retry.is_success else "failed",
+        )
+        return retry
+
     def _with_fallback(
         self,
         make_request,  # callable(headers: dict) -> httpx.Response
@@ -86,15 +120,35 @@ class GitHubClient:
     ) -> httpx.Response:
         """Execute ``make_request`` with the caller-appropriate minter.
 
-        Proactively uses the host minter when the pool's repo-access
-        cache confirms the caller's installation can't serve ``repo``
-        (avoids a doomed round-trip). On a fresh access failure that
-        looks like a cross-install issue, retries with the host minter
-        and primes the cache on success.
+        Two recovery layers stack here, in order, because they handle
+        distinct failure classes:
+
+        1. **401 → force-refresh + retry once.** The cached token may
+           be stale (a freshly-minted token GitHub hasn't fully
+           propagated, or a real upstream revocation). We force-refresh
+           the minter — single-flighted under the minter's own lock so
+           concurrent 401s collapse to one ``/access_tokens`` POST per
+           invalidation event — and reissue the original request
+           exactly once with the fresh token. A 401 on the retry
+           surfaces normally: by then it's a real auth problem.
+        2. **403/404 → cross-install fallback.** Proactively uses the
+           host minter when the pool's repo-access cache confirms the
+           caller's installation can't serve ``repo``. On a fresh
+           cross-install failure, retries with the host minter and
+           primes the cache on success.
+
+        The 401 retry is sequenced first because "this token is bad"
+        and "this token can't see this repo" are different problems:
+        routing a 401 through the cross-install fallback would mask
+        real auth breakage as a fallback hit.
         """
         caller = current_caller()
         minter = self._pool.for_caller_repo(caller, repo)
-        r = make_request(self._headers(minter.installation_token()))
+        token = minter.installation_token()
+        r = make_request(self._headers(token))
+
+        if r.status_code == 401:
+            r = self._refresh_and_retry_on_401(make_request, minter, token, r)
 
         if (
             repo is not None
