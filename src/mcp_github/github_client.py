@@ -48,6 +48,17 @@ def _is_cross_install_failure(r: httpx.Response) -> bool:
     return r.status_code == 404
 
 
+class ScopedTokenRepoMismatch(RuntimeError):
+    """Raised when GitHub mints a scoped token for the wrong repo owner."""
+
+    def __init__(self, missing: list[str]) -> None:
+        self.missing = missing
+        super().__init__(
+            "scoped token does not cover requested repositories: "
+            + ", ".join(missing)
+        )
+
+
 class GitHubClient:
     """Wraps GitHub API calls with the right per-caller App minter.
 
@@ -219,6 +230,117 @@ class GitHubClient:
                 if len(repos) < 100:
                     break
                 page += 1
+        return None
+
+    def _user_minter_for_repos(
+        self,
+        repos: list[tuple[str, str]],
+        *,
+        excludes: tuple[Any, ...] = (),
+    ):
+        """Find one user-facing App installation that contains every repo."""
+        wanted = {f"{owner}/{name}".lower() for owner, name in repos}
+        for install in self._pool.list_user_app_installations():
+            installation_id = int(install["id"])
+            minter = self._pool.user_app_minter(installation_id)
+            if any(minter is excluded for excluded in excludes):
+                continue
+            seen: set[str] = set()
+            page = 1
+            while True:
+                r = httpx.get(
+                    f"{GITHUB_API}/installation/repositories",
+                    headers=self._headers(minter.installation_token()),
+                    params={"per_page": 100, "page": page},
+                    timeout=15.0,
+                )
+                _check(r)
+                repos_page = r.json().get("repositories", [])
+                seen.update(repo["full_name"].lower() for repo in repos_page)
+                if wanted.issubset(seen):
+                    return minter
+                if len(repos_page) < 100:
+                    break
+                page += 1
+        return None
+
+    def _missing_from_scoped_token(
+        self,
+        token: str,
+        repos: list[tuple[str, str]] | None,
+    ) -> list[str]:
+        if not repos:
+            return []
+        wanted = {f"{owner}/{name}".lower() for owner, name in repos}
+        seen: set[str] = set()
+        page = 1
+        while True:
+            r = httpx.get(
+                f"{GITHUB_API}/installation/repositories",
+                headers=self._headers(token),
+                params={"per_page": 100, "page": page},
+                timeout=15.0,
+            )
+            _check(r)
+            repos_page = r.json().get("repositories", [])
+            seen.update(repo["full_name"].lower() for repo in repos_page)
+            if wanted.issubset(seen):
+                return []
+            if len(repos_page) < 100:
+                break
+            page += 1
+        return sorted(wanted - seen)
+
+    def _mint_verified_scoped_token(
+        self,
+        minter: GitHubAppTokenMinter,
+        *,
+        repositories: list[str] | None,
+        permissions: dict[str, str] | None,
+        repos_full: list[tuple[str, str]] | None,
+    ) -> tuple[str, str]:
+        token, expires = minter.mint_scoped_token(
+            repositories=repositories,
+            permissions=permissions,
+        )
+        missing = self._missing_from_scoped_token(token, repos_full)
+        if missing:
+            raise ScopedTokenRepoMismatch(missing)
+        return token, expires
+
+    def _mint_scoped_token_from_super_admin_fallback(
+        self,
+        *,
+        caller: CallerIdentity | None,
+        excludes: tuple[Any, ...],
+        repositories: list[str] | None,
+        permissions: dict[str, str] | None,
+        repos_full: list[tuple[str, str]],
+    ) -> tuple[str, str] | None:
+        if caller is None or not caller.is_super_admin or not repos_full:
+            return None
+
+        owner = repos_full[0][0]
+        candidates: list[GitHubAppTokenMinter] = []
+
+        host = self._pool.host_for_owner(owner)
+        if not any(host is excluded for excluded in excludes):
+            candidates.append(host)
+
+        user_minter = self._user_minter_for_repos(repos_full, excludes=excludes)
+        if user_minter is not None and user_minter not in candidates:
+            candidates.append(user_minter)
+
+        for candidate in candidates:
+            try:
+                return self._mint_verified_scoped_token(
+                    candidate,
+                    repositories=repositories,
+                    permissions=permissions,
+                    repos_full=repos_full,
+                )
+            except (httpx.HTTPStatusError, ScopedTokenRepoMismatch):
+                continue
         return None
 
     def get(
@@ -403,9 +525,24 @@ class GitHubClient:
         else:
             minter = self._pool.for_caller(caller)
         try:
-            return minter.mint_scoped_token(
-                repositories=repositories, permissions=permissions
+            return self._mint_verified_scoped_token(
+                minter,
+                repositories=repositories,
+                permissions=permissions,
+                repos_full=repos_full,
             )
+        except ScopedTokenRepoMismatch:
+            if repos_full:
+                fallback_result = self._mint_scoped_token_from_super_admin_fallback(
+                    caller=caller,
+                    excludes=(minter,),
+                    repositories=repositories,
+                    permissions=permissions,
+                    repos_full=repos_full,
+                )
+                if fallback_result is not None:
+                    return fallback_result
+            raise
         except httpx.HTTPStatusError as original:
             fallback = (
                 self._pool.host_for_owner(owner) if owner else self._pool.host
@@ -419,11 +556,23 @@ class GitHubClient:
                 and original.response.status_code in (404, 422)
             ):
                 try:
-                    token, expires = fallback.mint_scoped_token(
-                        repositories=repositories, permissions=permissions
+                    token, expires = self._mint_verified_scoped_token(
+                        fallback,
+                        repositories=repositories,
+                        permissions=permissions,
+                        repos_full=repos_full,
                     )
-                except httpx.HTTPStatusError:
-                    raise original
+                except (httpx.HTTPStatusError, ScopedTokenRepoMismatch):
+                    fallback_result = self._mint_scoped_token_from_super_admin_fallback(
+                        caller=caller,
+                        excludes=(minter, fallback),
+                        repositories=repositories,
+                        permissions=permissions,
+                        repos_full=repos_full,
+                    )
+                    if fallback_result is None:
+                        raise original
+                    token, expires = fallback_result
                 if caller is not None:
                     for owner, name in repos_full:
                         self._pool.record_repo_inaccessible(caller, owner, name)
