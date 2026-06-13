@@ -24,7 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mcp_github.auth import GitHubAppTokenMinter  # noqa: E402
 from mcp_github.caller import CALLER, CallerIdentity  # noqa: E402
-from mcp_github.github_client import GitHubClient, _is_cross_install_failure  # noqa: E402
+from mcp_github.github_client import (  # noqa: E402
+    GitHubClient,
+    ScopedTokenRepoMismatch,
+    _is_cross_install_failure,
+)
 from mcp_github.minter_pool import MinterPool  # noqa: E402
 
 
@@ -485,19 +489,29 @@ def test_mint_scoped_token_falls_back_to_host_on_422() -> None:
         return_value=("host-scoped-token", "2026-05-08T21:00:00Z")
     )
 
+    def fake_get(url, *, headers, params, timeout):
+        req = httpx.Request("GET", url)
+        assert headers["Authorization"].split()[1] == "host-scoped-token"
+        return httpx.Response(
+            200,
+            json={"repositories": [{"full_name": "romaine-life/tank-operator"}]},
+            request=req,
+        )
+
     token = CALLER.set(caller)
     try:
-        result_token, expires = client.mint_scoped_token(
-            repositories=["tank-operator"],
-            permissions={"contents": "read", "metadata": "read"},
-            repos_full=[("nelsong6", "tank-operator")],
-        )
+        with patch("mcp_github.github_client.httpx.get", side_effect=fake_get):
+            result_token, expires = client.mint_scoped_token(
+                repositories=["tank-operator"],
+                permissions={"contents": "read", "metadata": "read"},
+                repos_full=[("romaine-life", "tank-operator")],
+            )
     finally:
         CALLER.reset(token)
 
     assert result_token == "host-scoped-token"
     # Repo should be marked inaccessible in the pool after fallback.
-    assert not pool.caller_can_serve_repo(caller, "nelsong6", "tank-operator")
+    assert not pool.caller_can_serve_repo(caller, "romaine-life", "tank-operator")
 
 
 def test_mint_scoped_token_no_fallback_when_host_also_fails() -> None:
@@ -527,6 +541,7 @@ def test_mint_scoped_token_no_fallback_when_host_also_fails() -> None:
             ),
         )
     )
+    pool.list_user_app_installations = MagicMock(return_value=[])  # type: ignore[method-assign]
 
     token = CALLER.set(caller)
     try:
@@ -541,3 +556,92 @@ def test_mint_scoped_token_no_fallback_when_host_also_fails() -> None:
 
     # Should raise the original (user install) error, not the host error.
     assert exc_info.value is original_exc
+
+
+def test_host_super_admin_scoped_token_retries_user_installation_when_host_token_has_wrong_owner() -> None:
+    pool, host = _pool()
+    caller = _caller(is_host=True, is_super_admin=True)
+    client = _client(pool)
+
+    host.mint_scoped_token = MagicMock(  # type: ignore[method-assign]
+        return_value=("host-scoped-token", "2026-05-08T21:00:00Z")
+    )
+    user_minter = pool.user_app_minter(99)
+    _token_for(user_minter, "user-install-token")
+    user_minter.mint_scoped_token = MagicMock(  # type: ignore[method-assign]
+        return_value=("user-scoped-token", "2026-05-08T21:00:00Z")
+    )
+    pool.list_user_app_installations = MagicMock(return_value=[{"id": 99}])  # type: ignore[method-assign]
+
+    def fake_get(url, *, headers, params, timeout):
+        tok = headers["Authorization"].split()[1]
+        req = httpx.Request("GET", url)
+        if tok == "host-scoped-token":
+            return httpx.Response(
+                200,
+                json={"repositories": [{"full_name": "romaine-life/ambience"}]},
+                request=req,
+            )
+        if tok in {"user-install-token", "user-scoped-token"}:
+            return httpx.Response(
+                200,
+                json={"repositories": [{"full_name": "nelsong6/ambience"}]},
+                request=req,
+            )
+        raise AssertionError(f"unexpected token {tok}")
+
+    token = CALLER.set(caller)
+    try:
+        with patch("mcp_github.github_client.httpx.get", side_effect=fake_get):
+            result_token, expires = client.mint_scoped_token(
+                repositories=["ambience"],
+                permissions={"contents": "write", "metadata": "read"},
+                repos_full=[("nelsong6", "ambience")],
+            )
+    finally:
+        CALLER.reset(token)
+
+    assert result_token == "user-scoped-token"
+    assert expires == "2026-05-08T21:00:00Z"
+    host.mint_scoped_token.assert_called_once_with(
+        repositories=["ambience"],
+        permissions={"contents": "write", "metadata": "read"},
+    )
+    user_minter.mint_scoped_token.assert_called_once_with(
+        repositories=["ambience"],
+        permissions={"contents": "write", "metadata": "read"},
+    )
+
+
+def test_scoped_token_mismatch_fails_closed_without_super_admin_fallback() -> None:
+    pool, _ = _pool()
+    caller = _caller(is_super_admin=False)
+    client = _client(pool)
+
+    user_minter = pool.for_caller(caller)
+    user_minter.mint_scoped_token = MagicMock(  # type: ignore[method-assign]
+        return_value=("user-scoped-token", "2026-05-08T21:00:00Z")
+    )
+
+    def fake_get(url, *, headers, params, timeout):
+        req = httpx.Request("GET", url)
+        assert headers["Authorization"].split()[1] == "user-scoped-token"
+        return httpx.Response(
+            200,
+            json={"repositories": [{"full_name": "romaine-life/ambience"}]},
+            request=req,
+        )
+
+    token = CALLER.set(caller)
+    try:
+        with patch("mcp_github.github_client.httpx.get", side_effect=fake_get):
+            with pytest.raises(ScopedTokenRepoMismatch) as exc_info:
+                client.mint_scoped_token(
+                    repositories=["ambience"],
+                    permissions={"contents": "read", "metadata": "read"},
+                    repos_full=[("nelsong6", "ambience")],
+                )
+    finally:
+        CALLER.reset(token)
+
+    assert exc_info.value.missing == ["nelsong6/ambience"]
