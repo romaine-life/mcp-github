@@ -224,6 +224,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient, auditor: ControlActionAuditor
         repos: list[str],
         write: bool = False,
         workflows: bool = False,
+        full: bool = False,
     ) -> dict[str, str]:
         """Mint a short-lived (~1h) GitHub App installation token scoped over
         the given repos, suitable for `git clone` / `fetch` / `pull` (default)
@@ -271,6 +272,12 @@ def register_tools(mcp: FastMCP, gh: GitHubClient, auditor: ControlActionAuditor
                 touch `.github/workflows/*` go through. Requires write=True.
                 Does not allow Actions workflow dispatch; use
                 `dispatch_workflow` for that. Default False.
+            full: if True, mint with the installation's *entire* granted
+                permission set (pull_requests, issues, actions, administration,
+                …) rather than the contents/metadata subset, still scoped to
+                `repos`. Subsumes write/workflows. This is the Tank break-glass
+                "full token" escape hatch — gated by human approval upstream —
+                not a routine clone/push scope. Default False.
 
         Returns: {"token": "...", "expires_at": "<iso8601>"}.
         """
@@ -286,12 +293,23 @@ def register_tools(mcp: FastMCP, gh: GitHubClient, auditor: ControlActionAuditor
             repo_owner, repo_name = r.split("/", 1)
             repo_names.append(repo_name)
             repos_full.append((repo_owner, repo_name))
-        permissions: dict[str, str] = {
-            "contents": "write" if write else "read",
-            "metadata": "read",
-        }
-        if workflows:
-            permissions["workflows"] = "write"
+        permissions: dict[str, str] | None
+        if full:
+            # Omit `permissions` entirely so GitHub mints a token carrying the
+            # installation's *entire* granted permission set (pull_requests,
+            # issues, actions, administration, …), still scoped to `repos`.
+            # This is the Tank break-glass "full token" path: a genuine escape
+            # hatch needs more than contents, and the human break-glass
+            # approval — not a narrow scope — is what gates it. `write`/
+            # `workflows` are subsumed and ignored.
+            permissions = None
+        else:
+            permissions = {
+                "contents": "write" if write else "read",
+                "metadata": "read",
+            }
+            if workflows:
+                permissions["workflows"] = "write"
         # repos_full lets the client pick the Tank host App installation for
         # the repo's owner (e.g. the romaine-life org) and fall back across
         # installations on 403/422.
