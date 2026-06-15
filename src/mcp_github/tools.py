@@ -504,6 +504,96 @@ def register_tools(mcp: FastMCP, gh: GitHubClient, auditor: ControlActionAuditor
         }
 
     @mcp.tool()
+    def list_issue_comments(
+        owner: str, name: str, number: int,
+        since: str | None = None, limit: int | None = 30,
+        page: int = 1, max_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """List the conversation comments on a GitHub issue or pull request (PR).
+
+        Use to read discussion threads — the back-and-forth that get_issue and
+        get_pull_request omit (they return only the original title/body). This is
+        the shared issue/PR conversation timeline, so it works for either an issue
+        number or a PR number. It does NOT include inline diff review comments;
+        use list_pull_request_review_comments for those. `since` filters to an
+        ISO-8601 updated-at floor, `limit` caps rows per page (max 100), `page`
+        walks long threads, and `max_chars` optionally truncates each body.
+        """
+        cap = _clamp_limit(limit, default=30)
+        page_num = max(1, int(page))
+        params = _clean_params({"since": since, "per_page": min(cap, 100), "page": page_num})
+        body = gh.get(f"/repos/{owner}/{name}/issues/{number}/comments", params=params, repo=(owner, name))
+        rows = []
+        for c in body[:cap]:
+            text, truncated = _truncate_text(c.get("body") or "", max_chars)
+            rows.append({
+                "id": c["id"], "user": (c.get("user") or {}).get("login"),
+                "created_at": c.get("created_at"), "updated_at": c.get("updated_at"),
+                "author_association": c.get("author_association"),
+                "html_url": c.get("html_url"), "body": text, "body_truncated": truncated,
+            })
+        return {"comments": rows, "count": len(rows), "page": page_num,
+                "has_more": len(body) >= min(cap, 100)}
+
+    @mcp.tool()
+    def list_pull_request_review_comments(
+        owner: str, name: str, number: int,
+        since: str | None = None, limit: int | None = 30,
+        page: int = 1, max_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """List inline review comments on a pull request (PR) — comments anchored to a diff line.
+
+        Use to read code-review feedback tied to specific files/lines, which the
+        conversation timeline (list_issue_comments) does not include. Each row
+        carries the file path, diff hunk, line, and reply threading. `since`,
+        `limit`, `page`, and `max_chars` behave as in list_issue_comments.
+        """
+        cap = _clamp_limit(limit, default=30)
+        page_num = max(1, int(page))
+        params = _clean_params({"since": since, "per_page": min(cap, 100), "page": page_num})
+        body = gh.get(f"/repos/{owner}/{name}/pulls/{number}/comments", params=params, repo=(owner, name))
+        rows = []
+        for c in body[:cap]:
+            text, truncated = _truncate_text(c.get("body") or "", max_chars)
+            rows.append({
+                "id": c["id"], "user": (c.get("user") or {}).get("login"),
+                "path": c.get("path"), "line": c.get("line") or c.get("original_line"),
+                "commit_id": c.get("commit_id"), "diff_hunk": c.get("diff_hunk"),
+                "in_reply_to_id": c.get("in_reply_to_id"), "created_at": c.get("created_at"),
+                "html_url": c.get("html_url"), "body": text, "body_truncated": truncated,
+            })
+        return {"comments": rows, "count": len(rows), "page": page_num,
+                "has_more": len(body) >= min(cap, 100)}
+
+    @mcp.tool()
+    def list_pull_request_reviews(
+        owner: str, name: str, number: int,
+        limit: int | None = 30, page: int = 1, max_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """List the reviews submitted on a pull request (PR) with their verdicts.
+
+        Use to see who reviewed and whether they APPROVED, requested CHANGES, or
+        only COMMENTED, plus the review summary body — distinct from inline diff
+        comments (list_pull_request_review_comments) and the conversation timeline
+        (list_issue_comments). The reviews endpoint has no `since` filter.
+        """
+        cap = _clamp_limit(limit, default=30)
+        page_num = max(1, int(page))
+        params = {"per_page": min(cap, 100), "page": page_num}
+        body = gh.get(f"/repos/{owner}/{name}/pulls/{number}/reviews", params=params, repo=(owner, name))
+        rows = []
+        for rv in body[:cap]:
+            text, truncated = _truncate_text(rv.get("body") or "", max_chars)
+            rows.append({
+                "id": rv["id"], "user": (rv.get("user") or {}).get("login"),
+                "state": rv.get("state"), "submitted_at": rv.get("submitted_at"),
+                "commit_id": rv.get("commit_id"), "author_association": rv.get("author_association"),
+                "html_url": rv.get("html_url"), "body": text, "body_truncated": truncated,
+            })
+        return {"reviews": rows, "count": len(rows), "page": page_num,
+                "has_more": len(body) >= min(cap, 100)}
+
+    @mcp.tool()
     def search_code(query: str, limit: int | None = 20) -> list[dict[str, Any]]:
         """Search GitHub code across repositories this App installation can access.
 
