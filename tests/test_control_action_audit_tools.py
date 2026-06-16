@@ -102,6 +102,54 @@ def test_merge_pull_request_records_failed_when_github_rejects() -> None:
     assert "still a draft" in auditor.finished[0]["error"]
 
 
+def test_merge_pull_request_merges_when_expected_head_sha_matches() -> None:
+    mcp = FastMCP("test-github-mcp")
+    gh = MagicMock()
+    auditor = FakeAuditor()
+    gh.get.return_value = _fake_pr()
+    gh.put.return_value = {"merged": True, "sha": "merge-sha", "message": "merged"}
+    register_tools(mcp, gh, auditor)
+
+    result = _get_tool(mcp, "merge_pull_request")(
+        "romaine-life", "tank-operator", 857, expected_head_sha="head-sha"
+    )
+
+    assert result["merged"] is True
+    gh.put.assert_called_once()
+    assert auditor.finished[0]["status"] == "succeeded"
+
+
+def test_merge_pull_request_refuses_when_expected_head_sha_moved() -> None:
+    mcp = FastMCP("test-github-mcp")
+    gh = MagicMock()
+    auditor = FakeAuditor()
+    gh.get.return_value = _fake_pr()
+    register_tools(mcp, gh, auditor)
+
+    with pytest.raises(ValueError, match="head SHA moved"):
+        _get_tool(mcp, "merge_pull_request")(
+            "romaine-life", "tank-operator", 857, expected_head_sha="stale-sha"
+        )
+
+    # Refused before any write or audit record.
+    gh.put.assert_not_called()
+    assert auditor.started == []
+
+
+def test_merge_pull_request_skips_guard_when_expected_head_sha_absent() -> None:
+    mcp = FastMCP("test-github-mcp")
+    gh = MagicMock()
+    auditor = FakeAuditor()
+    gh.get.return_value = _fake_pr()
+    gh.put.return_value = {"merged": True, "sha": "merge-sha", "message": "merged"}
+    register_tools(mcp, gh, auditor)
+
+    result = _get_tool(mcp, "merge_pull_request")("romaine-life", "tank-operator", 857)
+
+    assert result["merged"] is True
+    gh.put.assert_called_once()
+
+
 def test_mark_ready_records_started_and_succeeded() -> None:
     mcp = FastMCP("test-github-mcp")
     gh = MagicMock()
