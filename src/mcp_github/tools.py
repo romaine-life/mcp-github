@@ -761,13 +761,29 @@ def register_tools(mcp: FastMCP, gh: GitHubClient, auditor: ControlActionAuditor
         return {"number": r["number"], "html_url": r["html_url"], "state": r["state"]}
 
     @mcp.tool()
-    def merge_pull_request(owner: str, name: str, number: int, merge_method: str = "merge", commit_title: str | None = None, commit_message: str | None = None) -> dict[str, Any]:
+    def merge_pull_request(owner: str, name: str, number: int, merge_method: str = "merge", commit_title: str | None = None, commit_message: str | None = None, expected_head_sha: str | None = None) -> dict[str, Any]:
         """Merge a GitHub pull request (PR) using merge, squash, or rebase.
 
         Use after checking review and CI status. `merge_method` is merge,
         squash, or rebase; optional title/message customize the merge commit.
+
+        `expected_head_sha` is an optional safety guard: when set, the PR's
+        current head SHA must equal it or the merge is refused before any
+        write — this protects callers (e.g. an automated orchestrator) from
+        merging a head that shifted out from under them. When omitted, the
+        guard is skipped and behavior is unchanged.
+
+        If GitHub refuses the merge (required checks/reviews unmet, conflicts,
+        a still-draft PR, etc.) the underlying error is surfaced unchanged.
         """
         pr = gh.get(f"/repos/{owner}/{name}/pulls/{number}", repo=(owner, name))
+        if expected_head_sha is not None:
+            actual_head_sha = (pr.get("head") or {}).get("sha")
+            if actual_head_sha != expected_head_sha:
+                raise ValueError(
+                    f"merge_pull_request: refusing to merge {owner}/{name}#{number}: "
+                    f"head SHA moved (expected {expected_head_sha}, found {actual_head_sha})"
+                )
         target_ref = pr.get("html_url") or f"https://github.com/{owner}/{name}/pull/{number}"
         invocation = auditor.start(
             source_tool="merge_pull_request",
