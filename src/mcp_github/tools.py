@@ -225,6 +225,7 @@ def register_tools(mcp: FastMCP, gh: GitHubClient, auditor: ControlActionAuditor
         write: bool = False,
         workflows: bool = False,
         full: bool = False,
+        pr_write: bool = False,
     ) -> dict[str, str]:
         """Mint a short-lived (~1h) GitHub App installation token scoped over
         the given repos, suitable for `git clone` / `fetch` / `pull` (default)
@@ -278,6 +279,16 @@ def register_tools(mcp: FastMCP, gh: GitHubClient, auditor: ControlActionAuditor
                 `repos`. Subsumes write/workflows. This is the Tank break-glass
                 "full token" escape hatch — gated by human approval upstream —
                 not a routine clone/push scope. Default False.
+            pr_write: if True, mint with {pull_requests: write, issues: write,
+                metadata: read} and crucially NO contents:write. This is the
+                scope the agent-egress proxy ("the wall") grants a RESTRICTED
+                session for expected PR management — open/edit/title/body/ready
+                a PR and comment on it (PR comments are issue comments) — while
+                merge and push-to-main stay denied *by capability*: both need
+                contents:write, which this token deliberately lacks, so there is
+                no body-parsing denylist to maintain. Mutually exclusive with the
+                contents-bearing scopes (write/workflows); subsumed by full.
+                Default False.
 
         Returns: {"token": "...", "expires_at": "<iso8601>"}.
         """
@@ -285,6 +296,11 @@ def register_tools(mcp: FastMCP, gh: GitHubClient, auditor: ControlActionAuditor
             raise ValueError("mint_clone_token: pass at least one repo (e.g. ['romaine-life/glimmung'])")
         if workflows and not write:
             raise ValueError("mint_clone_token: workflows=True requires write=True")
+        if pr_write and (write or workflows):
+            raise ValueError(
+                "mint_clone_token: pr_write=True is mutually exclusive with write/workflows "
+                "(pr_write deliberately grants no contents:write so merge/push stay denied)"
+            )
         repo_names: list[str] = []
         repos_full: list[tuple[str, str]] = []
         for r in repos:
@@ -303,6 +319,19 @@ def register_tools(mcp: FastMCP, gh: GitHubClient, auditor: ControlActionAuditor
             # approval — not a narrow scope — is what gates it. `write`/
             # `workflows` are subsumed and ignored.
             permissions = None
+        elif pr_write:
+            # PR-management scope: edit/comment/ready a PR but NEVER push or
+            # merge. pull_requests:write covers create/edit/ready (incl. the
+            # GraphQL mutations gh pr edit/ready emit); issues:write covers PR
+            # comments (a PR comment is an issue comment on GitHub). metadata is
+            # the always-required base read. There is intentionally NO contents
+            # permission, so a merge (POST /merge or GraphQL mergePullRequest)
+            # and any git push 403 by capability — the wall needs no denylist.
+            permissions = {
+                "pull_requests": "write",
+                "issues": "write",
+                "metadata": "read",
+            }
         else:
             permissions = {
                 "contents": "write" if write else "read",

@@ -44,6 +44,39 @@ def test_mint_clone_token_write_is_contents_write():
     }
 
 
+def test_mint_clone_token_pr_write_is_pulls_issues_no_contents():
+    gh = _gh()
+    _mint_clone_token_fn(gh)(repos=["romaine-life/tank-operator"], pr_write=True)
+    kwargs = gh.mint_scoped_token.call_args.kwargs
+    # PR-management scope: can edit/comment/ready a PR but CANNOT push or merge
+    # (no contents:write). This is what the wall grants a restricted session.
+    assert kwargs["permissions"] == {
+        "pull_requests": "write",
+        "issues": "write",
+        "metadata": "read",
+    }
+    assert "contents" not in kwargs["permissions"]
+    assert kwargs["repositories"] == ["tank-operator"]
+
+
+def test_mint_clone_token_pr_write_rejects_combination_with_write():
+    gh = _gh()
+    try:
+        _mint_clone_token_fn(gh)(repos=["romaine-life/tank-operator"], pr_write=True, write=True)
+    except ValueError as exc:
+        assert "mutually exclusive" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for pr_write + write")
+    gh.mint_scoped_token.assert_not_called()
+
+
+def test_mint_clone_token_full_subsumes_pr_write():
+    gh = _gh()
+    _mint_clone_token_fn(gh)(repos=["romaine-life/tank-operator"], full=True, pr_write=True)
+    # full wins: entire installation permission set, not the PR subset.
+    assert gh.mint_scoped_token.call_args.kwargs["permissions"] is None
+
+
 def test_mint_clone_token_full_omits_permissions_for_full_app_scope():
     gh = _gh()
     _mint_clone_token_fn(gh)(repos=["romaine-life/tank-operator"], full=True)
