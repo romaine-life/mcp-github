@@ -786,8 +786,62 @@ def register_tools(mcp: FastMCP, gh: GitHubClient, auditor: ControlActionAuditor
         payload: dict[str, Any] = {"title": title, "head": head, "base": base, "draft": draft}
         if body is not None:
             payload["body"] = body
-        r = gh.post(f"/repos/{owner}/{name}/pulls", json=payload, repo=(owner, name))
-        return {"number": r["number"], "html_url": r["html_url"], "state": r["state"]}
+        # Record the PR open as a durable control action so the session's
+        # pull_requests projection (the git chip / /pull-requests page) surfaces
+        # every PR the agent opens — mirroring merge_pull_request. The /pull/N URL
+        # only exists after the POST, so start the invocation against the repo URL
+        # (no "/pull/", so it records intent without a premature sighting) and
+        # finish with the real PR URL, which is the sighting. start fails closed
+        # (no audit record => no PR); the terminal finish is best-effort.
+        repo_ref = f"https://github.com/{owner}/{name}"
+        invocation = auditor.start(
+            source_tool="create_pull_request",
+            action="github.pull_request.open",
+            target_kind="github_pull_request",
+            target_ref=repo_ref,
+            repo_owner=owner,
+            repo_name=name,
+            pr_number=0,
+            payload={"head": head, "base": base, "draft": bool(draft)},
+        )
+        record_control_action("create_pull_request", "github.pull_request.open", "started", "ok")
+        try:
+            r = gh.post(f"/repos/{owner}/{name}/pulls", json=payload, repo=(owner, name))
+        except Exception as exc:
+            auditor.finish(
+                invocation,
+                source_tool="create_pull_request",
+                action="github.pull_request.open",
+                target_kind="github_pull_request",
+                target_ref=repo_ref,
+                repo_owner=owner,
+                repo_name=name,
+                pr_number=0,
+                status="failed",
+                error=str(exc),
+                payload={"head": head, "base": base},
+            )
+            record_control_action("create_pull_request", "github.pull_request.open", "failed", "github_failed")
+            raise
+        result = {"number": r["number"], "html_url": r["html_url"], "state": r["state"]}
+        try:
+            auditor.finish(
+                invocation,
+                source_tool="create_pull_request",
+                action="github.pull_request.open",
+                target_kind="github_pull_request",
+                target_ref=result["html_url"],
+                repo_owner=owner,
+                repo_name=name,
+                pr_number=int(result["number"]),
+                status="succeeded",
+                result_sha=str((r.get("head") or {}).get("sha") or ""),
+                payload={"state": result["state"], "draft": bool(draft)},
+            )
+            record_control_action("create_pull_request", "github.pull_request.open", "succeeded", "ok")
+        except Exception:
+            record_control_action("create_pull_request", "github.pull_request.open", "succeeded", "audit_failed")
+        return result
 
     @mcp.tool()
     def merge_pull_request(owner: str, name: str, number: int, merge_method: str = "merge", commit_title: str | None = None, commit_message: str | None = None, expected_head_sha: str | None = None) -> dict[str, Any]:

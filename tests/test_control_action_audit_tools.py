@@ -54,6 +54,71 @@ def _fake_pr():
     }
 
 
+def _fake_created_pr():
+    return {
+        "number": 1372,
+        "html_url": "https://github.com/romaine-life/tank-operator/pull/1372",
+        "state": "open",
+        "head": {"sha": "new-head-sha"},
+    }
+
+
+def test_create_pull_request_records_open_sighting() -> None:
+    mcp = FastMCP("test-github-mcp")
+    gh = MagicMock()
+    auditor = FakeAuditor()
+    gh.post.return_value = _fake_created_pr()
+    register_tools(mcp, gh, auditor)
+
+    result = _get_tool(mcp, "create_pull_request")(
+        "romaine-life", "tank-operator", "title", "feature", "main", body="b"
+    )
+
+    assert result["number"] == 1372
+    assert result["html_url"] == "https://github.com/romaine-life/tank-operator/pull/1372"
+    # Intent recorded before the write against the repo URL (no /pull/), so it
+    # does not create a premature sighting.
+    assert auditor.started[0]["source_tool"] == "create_pull_request"
+    assert auditor.started[0]["action"] == "github.pull_request.open"
+    assert "/pull/" not in auditor.started[0]["target_ref"]
+    # The terminal record carries the real /pull/N URL + number — the sighting.
+    assert auditor.finished[0]["status"] == "succeeded"
+    assert auditor.finished[0]["action"] == "github.pull_request.open"
+    assert auditor.finished[0]["target_ref"] == "https://github.com/romaine-life/tank-operator/pull/1372"
+    assert auditor.finished[0]["pr_number"] == 1372
+
+
+def test_create_pull_request_fails_closed_when_audit_start_fails() -> None:
+    mcp = FastMCP("test-github-mcp")
+    gh = MagicMock()
+    auditor = FakeAuditor(fail_start=True)
+    register_tools(mcp, gh, auditor)
+
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        _get_tool(mcp, "create_pull_request")(
+            "romaine-life", "tank-operator", "t", "feature", "main"
+        )
+
+    gh.post.assert_not_called()
+
+
+def test_create_pull_request_records_failed_when_github_rejects() -> None:
+    mcp = FastMCP("test-github-mcp")
+    gh = MagicMock()
+    auditor = FakeAuditor()
+    gh.post.side_effect = RuntimeError("validation failed")
+    register_tools(mcp, gh, auditor)
+
+    with pytest.raises(RuntimeError, match="validation failed"):
+        _get_tool(mcp, "create_pull_request")(
+            "romaine-life", "tank-operator", "t", "feature", "main"
+        )
+
+    assert auditor.started
+    assert auditor.finished[0]["status"] == "failed"
+    assert "validation failed" in auditor.finished[0]["error"]
+
+
 def test_merge_pull_request_records_started_and_succeeded() -> None:
     mcp = FastMCP("test-github-mcp")
     gh = MagicMock()
